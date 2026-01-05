@@ -125,10 +125,10 @@ def extract_activations(
     with torch.no_grad():
         output = model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
 
-    # Extract Hidden States (excluding the last one)
+    # Extract Hidden States (excluding initial embedding layer)
     # output.hidden_states is a tuple of (embedding_output, layer_1, ..., layer_N)
-    # We want all except the very last one (which is the final encoder output)
-    all_hidden_states = output.hidden_states[:-1]
+    # We want all except the very first one (which is the embedding layer)
+    all_hidden_states = output.hidden_states[1:25]
 
     # Stack them: (num_layers, batch_size, seq_len, hidden_dim)
     stacked_activations = torch.stack(all_hidden_states)
@@ -136,7 +136,7 @@ def extract_activations(
     # Verify shape
     print(f"Extracted activations shape: {stacked_activations.shape}")
     print("(Layers, Batch_Size, Sequence_Length, Hidden_Dim)")
-    print("Note: Layers includes the initial embedding layer.")
+    print("Note: Layers does not include the initial embedding layer.")
     
     return stacked_activations
 
