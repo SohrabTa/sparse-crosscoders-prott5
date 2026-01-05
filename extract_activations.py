@@ -5,9 +5,14 @@ import requests
 import random
 import re
 import argparse
+from typing import List, Tuple
 
-def get_device():
-    """Determine the best available device."""
+def get_device() -> torch.device:
+    """Determines the best available device.
+
+    Returns:
+        torch.device: The best available device (CUDA or MPS).
+    """
     if torch.cuda.is_available():
         print(f"Using GPU: {torch.cuda.get_device_name(0)}")
         return torch.device("cuda")
@@ -15,21 +20,40 @@ def get_device():
         print("Using Apple Silicon (MPS)")
         return torch.device("mps")
     else:
-        print("No GPU (CUDA or MPS) found! Using CPU, but this will be slow.")
-        return torch.device("cpu")
+        raise Exception("No GPU (CUDA or MPS) found!")
 
-def load_model(model_name, device):
-    """Load the model and tokenizer."""
+def load_model(model_name: str, device: torch.device, dtype: torch.dtype = torch.float16) -> Tuple[T5EncoderModel, T5Tokenizer]:
+    """Loads the T5 model and tokenizer.
+
+    Args:
+        model_name: The name of the model to load from HuggingFace.
+        device: The device to load the model onto.
+        dtype: The data type to use for the model.
+
+    Returns:
+        A tuple containing the loaded model and tokenizer.
+    """
     print(f"Loading model: {model_name}...")
     tokenizer = T5Tokenizer.from_pretrained(model_name, do_lower_case=False)
-    model = T5EncoderModel.from_pretrained(model_name, torch_dtype=torch.float16)
+    model = T5EncoderModel.from_pretrained(model_name, torch_dtype=dtype)
     model = model.to(device)
     model.eval()
     print("Model loaded successfully.")
     return model, tokenizer
 
-def get_random_uniref50_sequences(batch_size=5):
-    """Fetch random sequences from UniRef50."""
+def get_random_uniref50_sequences(batch_size: int = 5) -> List[str]:
+    """Fetches random sequences from UniRef50.
+
+    Args:
+        batch_size: The number of sequences to fetch. Defaults to 5.
+
+    Returns:
+        list of protein sequences as strings.
+        
+    Raises:
+        ValueError: If no results are found from the UniProt API.
+    """
+    # TODO replace this with loading from preprocessed fasta file 
     # Filter: Modified before 2019, length <= 512
     # UniRef search API
     url = "https://rest.uniprot.org/uniref/search"
@@ -67,8 +91,25 @@ def get_random_uniref50_sequences(batch_size=5):
             
     return sequences
 
-def extract_activations(model, tokenizer, sequences, device):
-    """Extract activations from the model for the given sequences."""
+def extract_activations(
+    model: T5EncoderModel, 
+    tokenizer: T5Tokenizer, 
+    sequences: List[str], 
+    device: torch.device
+) -> torch.Tensor:
+    """Extracts activations from the model for the given sequences.
+
+    Args:
+        model: The T5 encoder model.
+        tokenizer: The T5 tokenizer.
+        sequences: A list of protein sequences.
+        device: The device to run inference on.
+
+    Returns:
+        A tensor containing the extracted activations.
+        Shape: (num_layers, batch_size, seq_len, hidden_dim).
+        Note: Layers includes the initial embedding layer.
+    """
     # Pre-processing (Regex replace UZOB -> X, add spaces)
     processed_seqs = [" ".join(list(re.sub(r"[UZOB]", "X", seq))) for seq in sequences]
 
@@ -99,7 +140,8 @@ def extract_activations(model, tokenizer, sequences, device):
     
     return stacked_activations
 
-def main():
+def main() -> None:
+    """Main execution function."""
     parser = argparse.ArgumentParser(description="Extract activations from ProtT5 model.")
     parser.add_argument("--batch_size", type=int, default=5, help="Number of sequences to process.")
     parser.add_argument("--output", type=str, default="random_protein_activations_batch.pt", help="Output file path.")
