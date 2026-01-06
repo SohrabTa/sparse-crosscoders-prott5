@@ -1,11 +1,10 @@
-
 import torch
 from transformers import T5EncoderModel, T5Tokenizer
-import requests
-import random
 import re
 import argparse
 from typing import List, Tuple
+from Bio import SeqIO
+from pathlib import Path
 
 def get_device() -> torch.device:
     """Determines the best available device.
@@ -35,60 +34,32 @@ def load_model(model_name: str, device: torch.device, dtype: torch.dtype = torch
     """
     print(f"Loading model: {model_name}...")
     tokenizer = T5Tokenizer.from_pretrained(model_name, do_lower_case=False)
-    model = T5EncoderModel.from_pretrained(model_name, torch_dtype=dtype)
+    model = T5EncoderModel.from_pretrained(model_name, dtype=dtype)
     model = model.to(device)
     model.eval()
     print("Model loaded successfully.")
     return model, tokenizer
 
-def get_random_uniref50_sequences(batch_size: int = 5) -> List[str]:
-    """Fetches random sequences from UniRef50.
+def load_sequences_from_fasta(file_path: str) -> List[str]:
+    """Loads sequences from a FASTA file.
 
     Args:
-        batch_size: The number of sequences to fetch. Defaults to 5.
+        file_path: Path to the FASTA file.
 
     Returns:
         list of protein sequences as strings.
         
     Raises:
-        ValueError: If no results are found from the UniProt API.
+        FileNotFoundError: If the file does not exist.
     """
-    # TODO replace this with loading from preprocessed fasta file 
-    # Filter: Modified before 2019, length <= 512
-    # UniRef search API
-    url = "https://rest.uniprot.org/uniref/search"
-    query = "date_modified:[* TO 2019-01-01] AND length:[1 TO 512] identity:0.5"
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"FASTA file not found: {file_path}")
     
-    params = {
-        'query': query,
-        'format': 'json',
-        'size': 50  # Fetch a larger pool to sample from
-    }
-    
-    print(f"Fetching random sequences (batch_size={batch_size}) from UniRef50...")
-    response = requests.get(url, params=params)
-    response.raise_for_status()
-    data = response.json()
-    
-    if 'results' not in data or not data['results']:
-        raise ValueError("No results found for the query.")
-    
-    # Pick random entries
-    entries = random.sample(data['results'], min(batch_size, len(data['results'])))
-    
-    sequences = []
-    for entry in entries:
-        # Extract sequence
-        try:
-            seq = entry['representativeMember']['sequence']['value']
-            accession = entry['id']
-            print(f"Selected UniRef50 Entry: {accession}, Length: {len(seq)}")
-            sequences.append(seq)
-        except KeyError:
-            # Fallback if structure is different
-            print("Could not parse sequence from entry, dumping keys:", entry.keys())
-            continue
-            
+    print(f"Loading sequences from {file_path}...")
+    records = list(SeqIO.parse(path, "fasta"))
+    sequences = [str(record.seq) for record in records]
+    print(f"Loaded {len(sequences)} sequences.")
     return sequences
 
 def extract_activations(
@@ -136,14 +107,14 @@ def extract_activations(
     # Verify shape
     print(f"Extracted activations shape: {stacked_activations.shape}")
     print("(Layers, Batch_Size, Sequence_Length, Hidden_Dim)")
-    print("Note: Layers does not include the initial embedding layer.")
     
     return stacked_activations
 
 def main() -> None:
     """Main execution function."""
     parser = argparse.ArgumentParser(description="Extract activations from ProtT5 model.")
-    parser.add_argument("--batch_size", type=int, default=5, help="Number of sequences to process.")
+    parser.add_argument("--batch_size", type=int, default=5, help="Number of sequences to process from the file.")
+    parser.add_argument("--input", type=str, default="data/uniref50/uniref50_3M_length_512.fasta", help="Input FASTA file path.")
     parser.add_argument("--output", type=str, default="random_protein_activations_batch.pt", help="Output file path.")
     args = parser.parse_args()
 
@@ -151,10 +122,14 @@ def main() -> None:
     model_name = 'Rostlab/prot_t5_xl_half_uniref50-enc'
     model, tokenizer = load_model(model_name, device)
     
-    sequences = get_random_uniref50_sequences(batch_size=args.batch_size)
-    if not sequences:
-        print("No sequences found/parsed.")
+    all_sequences = load_sequences_from_fasta(args.input)
+    if not all_sequences:
+        print("No sequences found in the file.")
         return
+        
+    # Process only the first batch_size sequences
+    sequences = all_sequences[:args.batch_size]
+    print(f"Processing first {len(sequences)} sequences...")
 
     activations = extract_activations(model, tokenizer, sequences, device)
     
@@ -163,3 +138,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
