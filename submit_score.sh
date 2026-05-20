@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -p lrz-hgx-h100-94x4
 #SBATCH --gres=gpu:1
-#SBATCH -t 06:00:00
+#SBATCH -t 15:00:00
 #SBATCH -o logs/proteingym_score_%j.out
 #SBATCH -e logs/proteingym_score_%j.err
 
@@ -77,7 +77,8 @@ srun --container-image="nvcr.io/nvidia/pytorch:25.12-py3" \
        --matches ${MATCHES} \
        --dms_dir ${DMS_DIR} \
        --output_dir ${OUTPUT_DIR} \
-       --batch_size 8 \
+       --batch_size 16 \
+       --max_seq_len 2048 \
        --device cuda \
        --skip_existing"
 

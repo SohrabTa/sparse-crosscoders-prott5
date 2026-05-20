@@ -46,6 +46,7 @@ import argparse
 import logging
 import re
 import sys
+import warnings
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -53,7 +54,13 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import torch
-from scipy.stats import pearsonr, spearmanr
+from scipy.stats import ConstantInputWarning, pearsonr, spearmanr
+
+# Many candidate features stay silent on most proteins (zero Δactivation
+# across all variants), which makes scipy emit ConstantInputWarning per
+# correlation call. The resulting NaN is the desired signal; the warning
+# itself just floods stderr.
+warnings.filterwarnings("ignore", category=ConstantInputWarning)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT / "repos" / "InterPLM"))
@@ -383,6 +390,14 @@ def main():
         "--max_variants", type=int, default=None, help="Cap variants per assay (debug)"
     )
     ap.add_argument(
+        "--max_seq_len",
+        type=int,
+        default=None,
+        help="Skip assays whose target_seq_len exceeds this. Recommended: 2048 "
+        "(crosscoder was trained on ≤512; signal beyond that is dubious, "
+        "and the few mega-assays dominate runtime without contributing usable data).",
+    )
+    ap.add_argument(
         "--device",
         type=str,
         default=None,
@@ -411,6 +426,16 @@ def main():
         ].copy()
     else:
         work = matches.copy()
+
+    if args.max_seq_len is not None:
+        before = work["DMS_id"].nunique()
+        excluded = sorted(work[work["target_seq_len"] > args.max_seq_len]["DMS_id"].unique())
+        work = work[work["target_seq_len"] <= args.max_seq_len].copy()
+        if excluded:
+            log.info(
+                "Filtered %d/%d assays by max_seq_len=%d: dropped %s",
+                len(excluded), before, args.max_seq_len, excluded,
+            )
 
     # Group by assay so we do one ProtT5 + crosscoder pass per assay, slicing
     # the cached activations for each matched concept.
