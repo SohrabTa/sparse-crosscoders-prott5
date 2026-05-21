@@ -79,8 +79,7 @@ srun --container-image="nvcr.io/nvidia/pytorch:25.12-py3" \
        --output_dir ${OUTPUT_DIR} \
        --batch_size 16 \
        --max_seq_len 2048 \
-       --device cuda \
-       --skip_existing"
+       --device cuda"
 
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
