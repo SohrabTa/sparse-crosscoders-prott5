@@ -68,6 +68,10 @@ sys.path.insert(0, str(_REPO_ROOT / "repos" / "crosscode"))
 
 from interplm.embedders.prott5 import ProtT5CrosscoderEmbedder  # noqa: E402
 from interplm.sae.inference import load_sae  # noqa: E402
+from crosscode.models.activations.topk import (  # noqa: E402
+    BatchTopkActivation,
+    TopkActivation,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("score_pg")
@@ -408,6 +412,18 @@ def main():
         action="store_true",
         help="Skip assays whose per_variant.parquet files all already exist",
     )
+    ap.add_argument(
+        "--inference_activation",
+        type=str,
+        choices=["keep", "topk"],
+        default="keep",
+        help="'keep' uses the activation function the crosscoder was trained with "
+        "(BatchTopK in our case, where features compete for budget across all tokens "
+        "in the batch — selection becomes batch-composition-dependent). "
+        "'topk' swaps to per-token TopK at inference (same k as training): no "
+        "batch competition, each token's active set depends only on its own pre-acts. "
+        "Recommended when scoring DMS variants where batch composition is arbitrary.",
+    )
     args = ap.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -467,6 +483,35 @@ def main():
         args.crosscoder_dir, device=str(device), model_name=args.checkpoint
     )
     crosscoder.eval()
+
+    # Optional: swap BatchTopK -> per-token TopK at inference. BatchTopK ties the
+    # set of active features to the batch composition (tokens compete for a
+    # shared k*batch budget). For DMS scoring where batch contents are
+    # arbitrary, that adds noise to Δactivations across variants. Per-token
+    # TopK keeps the same k but removes the inter-token competition.
+    inner = getattr(crosscoder, "crosscoder", crosscoder)
+    current_act = getattr(inner, "activation_fn", None)
+    if args.inference_activation == "topk":
+        if isinstance(current_act, BatchTopkActivation):
+            k = current_act.k_per_example
+            inner.activation_fn = TopkActivation(k=k).to(device)
+            log.info(
+                "Swapped inference activation: BatchTopkActivation(k=%d) -> TopkActivation(k=%d)",
+                k, k,
+            )
+        elif isinstance(current_act, TopkActivation):
+            log.info("Inference activation already TopkActivation(k=%d); no swap", current_act.k)
+        else:
+            log.warning(
+                "--inference_activation=topk requested, but current activation is %s; "
+                "not swapping (don't know what k to use).",
+                type(current_act).__name__,
+            )
+    else:
+        log.info(
+            "Inference activation kept as trained: %s",
+            type(current_act).__name__ if current_act is not None else "?",
+        )
 
     all_summary: List[dict] = []
     for i, (dms_id, concepts) in enumerate(assays_grouped.items()):

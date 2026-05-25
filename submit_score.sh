@@ -46,7 +46,7 @@ CROSSCODER_DIR="/workspace/model_checkpoints/crosscoder_l8192_k32_bs512_full_202
 PAIRINGS="/workspace/InterPLM/results/crosscoder_eval/uniprotkb_modern_score45_67k/test_counts/heldout_all_top_pairings.csv"
 MATCHES="/workspace/data/proteingym/concept_matches.csv"
 DMS_DIR="/workspace/data/DMS_ProteinGym_substitutions"
-OUTPUT_DIR="/workspace/data/proteingym/scoring"
+OUTPUT_DIR="/workspace/data/proteingym/scoring_topk"
 
 # Env
 export HF_HOME="/workspace/data/hf_home"
@@ -79,6 +79,7 @@ srun --container-image="nvcr.io/nvidia/pytorch:25.12-py3" \
        --output_dir ${OUTPUT_DIR} \
        --batch_size 16 \
        --max_seq_len 2048 \
+       --inference_activation topk \
        --device cuda"
 
 END_TIME=$(date +%s)
