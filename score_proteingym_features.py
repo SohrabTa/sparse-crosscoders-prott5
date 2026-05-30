@@ -66,15 +66,80 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT / "repos" / "InterPLM"))
 sys.path.insert(0, str(_REPO_ROOT / "repos" / "crosscode"))
 
+import yaml  # noqa: E402
+
 from interplm.embedders.prott5 import ProtT5CrosscoderEmbedder  # noqa: E402
 from interplm.sae.inference import load_sae  # noqa: E402
-from crosscode.models.activations.topk import (  # noqa: E402
-    BatchTopkActivation,
-    TopkActivation,
-)
+
+# crosscode.log.setup_logger() runs dictConfig with disable_existing_loggers=True
+# at import time, which silences any logger created before it. Import it here so
+# our "score_pg" logger (created just below) is made afterwards and survives.
+import crosscode.log  # noqa: E402,F401
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("score_pg")
+log.setLevel(logging.INFO)
+
+
+def load_crosscoder(crosscoder_dir: Path, checkpoint: str, device: str,
+                    inference_activation: str):
+    """Load the crosscoder, optionally overriding the activation function the
+    *native* crosscode way.
+
+    The model serializes its activation in config.yaml as
+        activation_fn: {classname: BatchTopkActivation, cfg: {k_per_example: 32}}
+    and `ModelHookpointAcausalCrosscoder._scaffold_from_cfg` rebuilds it via
+    ACTIVATIONS_MAP. To run inference under per-token TopK instead of the
+    BatchTopK used at train time, we rewrite that block to
+        activation_fn: {classname: TopkActivation, cfg: {k: 32}}
+    before scaffolding. The activation function carries no learned parameters,
+    so the trained encoder/decoder/bias weights load onto either scaffold.
+
+    `inference_activation="keep"` defers to InterPLM's load_sae unchanged.
+    """
+    if inference_activation == "keep":
+        return load_sae(crosscoder_dir, device=device, model_name=checkpoint)
+
+    from crosscode.models.acausal_crosscoder import ModelHookpointAcausalCrosscoder
+    from crosscode.interplm_adapter.crosscoder_dictionary import (
+        CrosscoderDictionaryWrapper,
+    )
+
+    cfg = yaml.unsafe_load((Path(crosscoder_dir) / "config.yaml").read_text())
+    act = cfg.get("activation_fn", {})
+    if inference_activation == "topk":
+        if act.get("classname") == "BatchTopkActivation":
+            k = act["cfg"]["k_per_example"]
+            cfg["activation_fn"] = {"classname": "TopkActivation", "cfg": {"k": k}}
+            log.info(
+                "Native activation override: BatchTopkActivation(k_per_example=%d) "
+                "-> TopkActivation(k=%d)", k, k,
+            )
+        elif act.get("classname") == "TopkActivation":
+            log.info("Config already TopkActivation; no override")
+        else:
+            raise ValueError(
+                f"--inference_activation=topk but config activation is "
+                f"{act.get('classname')!r}; don't know how to map it."
+            )
+
+    autoencoder = ModelHookpointAcausalCrosscoder._scaffold_from_cfg(cfg)
+    wrapper = CrosscoderDictionaryWrapper(autoencoder)
+    state_dict = torch.load(
+        Path(crosscoder_dir) / checkpoint, map_location=device, weights_only=True
+    )
+    if any(k.startswith("crosscoder.") for k in state_dict.keys()):
+        wrapper.load_state_dict(state_dict, strict=False)
+    else:
+        autoencoder.load_state_dict(state_dict, strict=False)
+    wrapper.to(device)
+    wrapper.eval()
+    # Sanity: confirm the scaffold actually built the requested activation.
+    from crosscode.models.activations.topk import TopkActivation
+    assert isinstance(wrapper.crosscoder.activation_fn, TopkActivation), (
+        "native activation override did not bind"
+    )
+    return wrapper
 
 
 # Curated 10-assay subset useful for narrow / quick experiments. The script
@@ -478,40 +543,18 @@ def main():
 
     log.info("Loading ProtT5...")
     embedder = ProtT5CrosscoderEmbedder(device=str(device))
-    log.info("Loading crosscoder from %s/%s", args.crosscoder_dir, args.checkpoint)
-    crosscoder = load_sae(
-        args.crosscoder_dir, device=str(device), model_name=args.checkpoint
+    log.info(
+        "Loading crosscoder from %s/%s (inference_activation=%s)",
+        args.crosscoder_dir, args.checkpoint, args.inference_activation,
+    )
+    # Activation choice is applied the native crosscode way (rewriting the
+    # activation_fn block in the model config before scaffolding) — see
+    # load_crosscoder(). "keep" uses the trained BatchTopK; "topk" runs per-token
+    # TopK, removing the batch-composition dependence of which features fire.
+    crosscoder = load_crosscoder(
+        args.crosscoder_dir, args.checkpoint, str(device), args.inference_activation
     )
     crosscoder.eval()
-
-    # Optional: swap BatchTopK -> per-token TopK at inference. BatchTopK ties the
-    # set of active features to the batch composition (tokens compete for a
-    # shared k*batch budget). For DMS scoring where batch contents are
-    # arbitrary, that adds noise to Δactivations across variants. Per-token
-    # TopK keeps the same k but removes the inter-token competition.
-    inner = getattr(crosscoder, "crosscoder", crosscoder)
-    current_act = getattr(inner, "activation_fn", None)
-    if args.inference_activation == "topk":
-        if isinstance(current_act, BatchTopkActivation):
-            k = current_act.k_per_example
-            inner.activation_fn = TopkActivation(k=k).to(device)
-            log.info(
-                "Swapped inference activation: BatchTopkActivation(k=%d) -> TopkActivation(k=%d)",
-                k, k,
-            )
-        elif isinstance(current_act, TopkActivation):
-            log.info("Inference activation already TopkActivation(k=%d); no swap", current_act.k)
-        else:
-            log.warning(
-                "--inference_activation=topk requested, but current activation is %s; "
-                "not swapping (don't know what k to use).",
-                type(current_act).__name__,
-            )
-    else:
-        log.info(
-            "Inference activation kept as trained: %s",
-            type(current_act).__name__ if current_act is not None else "?",
-        )
 
     all_summary: List[dict] = []
     for i, (dms_id, concepts) in enumerate(assays_grouped.items()):
