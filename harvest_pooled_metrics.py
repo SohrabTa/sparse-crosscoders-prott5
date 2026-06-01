@@ -50,6 +50,7 @@ Usage (cluster full run): omit --max_variants and --assays.
 from __future__ import annotations
 
 import argparse
+import gc
 import logging
 import re
 import sys
@@ -60,8 +61,39 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import torch
 from scipy.stats import ConstantInputWarning, spearmanr
+
+# Pinned schema so the per-batch streaming writer (see harvest_one_assay) gets
+# a consistent type layout — without this, pyarrow infers per batch and a column
+# that happens to be all-zero in batch 1 vs varied in batch 2 can cause a type
+# mismatch crash. Floats are stored as float32 to halve on-disk size.
+POOLED_SCHEMA = pa.schema([
+    ("DMS_id", pa.string()),
+    ("mutant", pa.string()),
+    ("position", pa.int32()),
+    ("centroid_pos", pa.int32()),
+    ("n_mutations", pa.int16()),
+    ("DMS_score", pa.float32()),
+    ("feature", pa.int32()),
+    ("g_at_pos_wt", pa.float32()),
+    ("g_at_pos_mut", pa.float32()),
+    ("g_delta_at_pos", pa.float32()),
+    ("g_pool_mean_abs", pa.float32()),
+    ("g_pool_max_abs", pa.float32()),
+    ("g_pool_mean_mut", pa.float32()),
+    ("g_pool_max_mut", pa.float32()),
+    ("fire_rate_gated_var", pa.float32()),
+    ("d_at_pos_wt", pa.float32()),
+    ("d_at_pos_mut", pa.float32()),
+    ("d_delta_at_pos", pa.float32()),
+    ("d_pool_mean_abs", pa.float32()),
+    ("d_pool_max_abs", pa.float32()),
+    ("d_pool_mean_mut", pa.float32()),
+    ("d_pool_max_mut", pa.float32()),
+])
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT / "repos" / "InterPLM"))
@@ -190,93 +222,115 @@ def harvest_one_assay(
     wt_fire_gated = (wt_gated != 0).astype(np.float32)
     L_wt = wt_gated.shape[0]
 
-    rows: List[dict] = []
-    n_batches = (len(dms) + batch_size - 1) // batch_size
-    for bi in range(n_batches):
-        s, e = bi * batch_size, min((bi + 1) * batch_size, len(dms))
-        batch_df = dms.iloc[s:e]
-        seqs = batch_df["mutated_sequence"].tolist()
-        # Use boundaries variant to get per-sequence slices in one batch call
-        bundle = embedder.extract_embeddings_with_boundaries(
-            seqs, layer=-1, batch_size=batch_size
-        )
-        emb_all = bundle["embeddings"]  # (total_tokens, 1, 24, 1024)
-        boundaries = bundle["boundaries"]
-        all_gated, all_dense = encode_full_features(crosscoder, emb_all, feat_idx, device)
-
-        for (_, vrow), (b_start, b_end) in zip(batch_df.iterrows(), boundaries):
-            parsed = parse_mutant_positions(str(vrow["mutant"]))
-            if not parsed:
-                continue
-            mut_gated = all_gated[b_start:b_end]  # (L_var, n_union)
-            mut_dense = all_dense[b_start:b_end]
-            L_var = mut_gated.shape[0]
-            L_cmp = min(L_var, L_wt)
-            # delta arrays (truncate to whichever is shorter, almost always L_var == L_wt for substitutions)
-            dg = mut_gated[:L_cmp] - wt_gated[:L_cmp]
-            dd = mut_dense[:L_cmp] - wt_dense[:L_cmp]
-            mg = mut_gated[:L_cmp]
-            md = mut_dense[:L_cmp]
-            wg = wt_gated[:L_cmp]
-            wd = wt_dense[:L_cmp]
-            # Pool-over-sequence stats (computed once per variant, shared across positions)
-            adg = np.abs(dg)
-            add = np.abs(dd)
-            g_pool_mean_abs = adg.mean(axis=0)  # (n_union,)
-            g_pool_max_abs  = adg.max(axis=0)
-            g_pool_mean_mut = mg.mean(axis=0)
-            g_pool_max_mut  = mg.max(axis=0)
-            d_pool_mean_abs = add.mean(axis=0)
-            d_pool_max_abs  = add.max(axis=0)
-            d_pool_mean_mut = md.mean(axis=0)
-            d_pool_max_mut  = md.max(axis=0)
-            fire_gated_var = (mg != 0).astype(np.float32).mean(axis=0)
-            n_mut = len(parsed)
-            positions = [p for _, p, _ in parsed if 0 <= p - 1 < L_cmp]
-            if not positions:
-                continue
-            centroid_pos = int(round(np.mean(positions)))
-            for pos in positions:
-                gi = wg[pos - 1]; gj = mg[pos - 1]; dgi = dg[pos - 1]
-                di = wd[pos - 1]; dj = md[pos - 1]; ddi = dd[pos - 1]
-                for feat in union_feats:
-                    i = feat_to_idx[feat]
-                    rows.append({
-                        "DMS_id": dms_id,
-                        "mutant": str(vrow["mutant"]),
-                        "position": pos,
-                        "centroid_pos": centroid_pos,
-                        "n_mutations": n_mut,
-                        "DMS_score": float(vrow["DMS_score"]),
-                        "feature": int(feat),
-                        # gated
-                        "g_at_pos_wt": float(gi[i]),
-                        "g_at_pos_mut": float(gj[i]),
-                        "g_delta_at_pos": float(dgi[i]),
-                        "g_pool_mean_abs": float(g_pool_mean_abs[i]),
-                        "g_pool_max_abs":  float(g_pool_max_abs[i]),
-                        "g_pool_mean_mut": float(g_pool_mean_mut[i]),
-                        "g_pool_max_mut":  float(g_pool_max_mut[i]),
-                        "fire_rate_gated_var": float(fire_gated_var[i]),
-                        # dense
-                        "d_at_pos_wt": float(di[i]),
-                        "d_at_pos_mut": float(dj[i]),
-                        "d_delta_at_pos": float(ddi[i]),
-                        "d_pool_mean_abs": float(d_pool_mean_abs[i]),
-                        "d_pool_max_abs":  float(d_pool_max_abs[i]),
-                        "d_pool_mean_mut": float(d_pool_mean_mut[i]),
-                        "d_pool_max_mut":  float(d_pool_max_mut[i]),
-                    })
-        if bi % 50 == 0:
-            log.info("    batch %d/%d", bi + 1, n_batches)
-
-    if not rows:
-        return 0
-    df = pd.DataFrame(rows)
+    # Streaming write: open a ParquetWriter on the first non-empty batch and
+    # append one row-group per batch. Peak memory is bounded by the largest
+    # single batch (~batch_size × n_union × ~22 fields ≈ kilobytes), which lets
+    # us safely process assays like PHOT_CHLRE (167 k variants) without OOM.
     out_path = output_dir / f"{dms_id}__pooled.parquet"
-    df.to_parquet(out_path, index=False)
-    log.info("  wrote %d (variant, feature) rows -> %s", len(df), out_path.name)
-    return len(df)
+    tmp_path = out_path.with_suffix(".parquet.tmp")
+    writer: Optional[pq.ParquetWriter] = None
+    total_rows = 0
+    n_batches = (len(dms) + batch_size - 1) // batch_size
+    try:
+        for bi in range(n_batches):
+            s, e = bi * batch_size, min((bi + 1) * batch_size, len(dms))
+            batch_df = dms.iloc[s:e]
+            seqs = batch_df["mutated_sequence"].tolist()
+            bundle = embedder.extract_embeddings_with_boundaries(
+                seqs, layer=-1, batch_size=batch_size
+            )
+            emb_all = bundle["embeddings"]
+            boundaries = bundle["boundaries"]
+            all_gated, all_dense = encode_full_features(
+                crosscoder, emb_all, feat_idx, device
+            )
+
+            batch_rows: List[dict] = []
+            for (_, vrow), (b_start, b_end) in zip(batch_df.iterrows(), boundaries):
+                parsed = parse_mutant_positions(str(vrow["mutant"]))
+                if not parsed:
+                    continue
+                mut_gated = all_gated[b_start:b_end]  # (L_var, n_union)
+                mut_dense = all_dense[b_start:b_end]
+                L_var = mut_gated.shape[0]
+                L_cmp = min(L_var, L_wt)
+                dg = mut_gated[:L_cmp] - wt_gated[:L_cmp]
+                dd = mut_dense[:L_cmp] - wt_dense[:L_cmp]
+                mg = mut_gated[:L_cmp]
+                md = mut_dense[:L_cmp]
+                wg = wt_gated[:L_cmp]
+                wd = wt_dense[:L_cmp]
+                adg = np.abs(dg)
+                add = np.abs(dd)
+                g_pool_mean_abs = adg.mean(axis=0)
+                g_pool_max_abs  = adg.max(axis=0)
+                g_pool_mean_mut = mg.mean(axis=0)
+                g_pool_max_mut  = mg.max(axis=0)
+                d_pool_mean_abs = add.mean(axis=0)
+                d_pool_max_abs  = add.max(axis=0)
+                d_pool_mean_mut = md.mean(axis=0)
+                d_pool_max_mut  = md.max(axis=0)
+                fire_gated_var = (mg != 0).astype(np.float32).mean(axis=0)
+                n_mut = len(parsed)
+                positions = [p for _, p, _ in parsed if 0 <= p - 1 < L_cmp]
+                if not positions:
+                    continue
+                centroid_pos = int(round(np.mean(positions)))
+                mutant_str = str(vrow["mutant"])
+                dms_score = float(vrow["DMS_score"])
+                for pos in positions:
+                    gi = wg[pos - 1]; gj = mg[pos - 1]; dgi = dg[pos - 1]
+                    di = wd[pos - 1]; dj = md[pos - 1]; ddi = dd[pos - 1]
+                    for feat in union_feats:
+                        i = feat_to_idx[feat]
+                        batch_rows.append({
+                            "DMS_id": dms_id,
+                            "mutant": mutant_str,
+                            "position": pos,
+                            "centroid_pos": centroid_pos,
+                            "n_mutations": n_mut,
+                            "DMS_score": dms_score,
+                            "feature": int(feat),
+                            "g_at_pos_wt": float(gi[i]),
+                            "g_at_pos_mut": float(gj[i]),
+                            "g_delta_at_pos": float(dgi[i]),
+                            "g_pool_mean_abs": float(g_pool_mean_abs[i]),
+                            "g_pool_max_abs":  float(g_pool_max_abs[i]),
+                            "g_pool_mean_mut": float(g_pool_mean_mut[i]),
+                            "g_pool_max_mut":  float(g_pool_max_mut[i]),
+                            "fire_rate_gated_var": float(fire_gated_var[i]),
+                            "d_at_pos_wt": float(di[i]),
+                            "d_at_pos_mut": float(dj[i]),
+                            "d_delta_at_pos": float(ddi[i]),
+                            "d_pool_mean_abs": float(d_pool_mean_abs[i]),
+                            "d_pool_max_abs":  float(d_pool_max_abs[i]),
+                            "d_pool_mean_mut": float(d_pool_mean_mut[i]),
+                            "d_pool_max_mut":  float(d_pool_max_mut[i]),
+                        })
+
+            if batch_rows:
+                table = pa.Table.from_pylist(batch_rows, schema=POOLED_SCHEMA)
+                if writer is None:
+                    writer = pq.ParquetWriter(tmp_path, POOLED_SCHEMA, compression="snappy")
+                writer.write_table(table)
+                total_rows += len(batch_rows)
+                # Explicitly drop to keep peak bounded.
+                del batch_rows, table
+
+            if bi % 50 == 0:
+                log.info("    batch %d/%d (cumulative rows: %d)", bi + 1, n_batches, total_rows)
+    finally:
+        if writer is not None:
+            writer.close()
+
+    if total_rows == 0:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        return 0
+    # Atomic rename so partial writes never get committed under the final name.
+    tmp_path.replace(out_path)
+    log.info("  wrote %d (variant, feature) rows -> %s", total_rows, out_path.name)
+    return total_rows
 
 
 def compute_summary(output_dir: Path, matches_path: Path, pairings_path: Path) -> None:
@@ -417,6 +471,16 @@ def main():
             total_rows += n
         except Exception as e:
             log.exception("  failed on %s: %s", dms_id, e)
+        # Defensive cleanup between assays. The cluster's 92 GB OOM on the
+        # previous run was almost certainly cumulative growth across 95 assays
+        # (rows list could only explain ~8 GB on its own). Cycling the GC and
+        # releasing PyTorch's CUDA caching allocator buffers back to the OS
+        # bounds per-assay carry-over to near zero.
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        elif torch.backends.mps.is_available():
+            torch.mps.empty_cache()
     log.info("Total rows written: %d", total_rows)
 
     if args.compute_summary:
