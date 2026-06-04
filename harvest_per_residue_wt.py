@@ -111,14 +111,16 @@ def harvest_one(dms_id, dms_dir, embedder, crosscoder, n_latents, device):
     A = wt_act[pos0, :]            # (n_pos, 8192) activations at the scored positions
     frac_active = (wt_act > 0).mean(axis=0)  # over ALL residues (MotifAE >=30% filter basis)
 
-    rhos = np.full(n_latents, np.nan, dtype=np.float32)
-    for f in range(n_latents):
-        a = A[:, f]
-        if np.std(a) < 1e-9 or np.std(m) < 1e-9:
-            continue
-        r = spearmanr(a, m).statistic
-        if np.isfinite(r):
-            rhos[f] = r
+    # Vectorized Spearman = Pearson on ranks (average ties), m fixed across all features.
+    rm = pd.Series(m).rank().to_numpy(dtype=np.float64)
+    rm_c = rm - rm.mean()
+    rm_norm = np.sqrt((rm_c ** 2).sum())
+    rA = pd.DataFrame(A.astype(np.float64)).rank().to_numpy()   # (n_pos, 8192), avg ties per column
+    rA_c = rA - rA.mean(axis=0, keepdims=True)
+    denom = np.sqrt((rA_c ** 2).sum(axis=0)) * rm_norm          # 0 for constant features / constant m
+    with np.errstate(invalid="ignore", divide="ignore"):
+        rhos = (rA_c.T @ rm_c) / denom                          # (8192,)
+    rhos = np.where(np.isfinite(rhos), rhos, np.nan).astype(np.float32)
     return pd.DataFrame({"DMS_id": dms_id, "feature": np.arange(n_latents),
                          "spearman": rhos, "frac_active": frac_active.astype(np.float32),
                          "n_pos": int(len(good))})
