@@ -24,6 +24,7 @@ OUTDIR = ROOT / "data/figures"
 OUTDIR.mkdir(parents=True, exist_ok=True)
 
 OURS = "#1f77b4"
+OURS2 = "#4fa3d1"
 NULL = "#b0b0b0"
 LIT = "#7050b0"
 
@@ -97,40 +98,43 @@ def fig_holdout(ho):
     return tr, te
 
 
-def fig_per_residue(ho):
-    ours = ho["per_residue_best"].dropna().median()
-    bars = [("Ours\n(ProtT5, concept-matched)", ours, OURS),
-            ("Plain SAE\n(MotifAE paper, ESM2)", PLAIN_SAE, LIT),
-            ("MotifAE\n(ESM2)", MOTIFAE, LIT)]
+def fig_per_residue(pr):
+    def med(c): return pr[c].dropna().median()
+    bars = [("Ours: MotifAE pool\n(live, ≥30%-active)", med("active30_best"), OURS),
+            ("MotifAE\n(ESM2)", MOTIFAE, LIT),
+            ("Plain SAE\n(MotifAE paper)", PLAIN_SAE, LIT),
+            ("Ours: paired\n(≥30%-active)", med("active30_paired_best"), OURS2),
+            ("Dead features\n(floor)", med("dead_best"), NULL)]
     labels = [b[0] for b in bars]; vals = [b[1] for b in bars]; cols = [b[2] for b in bars]
-    fig, ax = plt.subplots(figsize=(6.5, 4.4))
-    rects = ax.bar(labels, vals, color=cols, width=0.6, edgecolor="black", lw=0.3)
+    fig, ax = plt.subplots(figsize=(8, 4.4))
+    rects = ax.bar(labels, vals, color=cols, width=0.62, edgecolor="black", lw=0.3)
     for r, v in zip(rects, vals):
         ax.text(r.get_x() + r.get_width() / 2, v + 0.008, f"{v:.2f}", ha="center", fontsize=11)
     ax.set_ylabel("Median per-residue |ρ|  (best feature per assay)")
     ax.set_ylim(0, max(vals) * 1.2)
-    ax.set_title("Per-residue readout (MotifAE-comparable)\n"
-                 "literature numbers are ESM2 + selection over thousands of dense features",
+    ax.set_title("Per-residue readout, MotifAE-comparable pool\n"
+                 "competitive with MotifAE (0.41) — but via unpaired dense features; paired are weak, dead ≈ 0",
                  loc="left", pad=8)
     ax.spines[["top", "right"]].set_visible(False)
     fig.tight_layout(); fig.savefig(OUTDIR / "pg_04_per_residue.png", dpi=200); plt.close(fig)
-    return ours
+    return med("active30_best")
 
 
 def main():
     summ = pd.read_csv(PG / "pooled_metrics/summary.csv")
     cc = pd.read_csv(PG / "chance_control_summary.csv")
     ho = pd.read_csv(PG / "per_residue_holdout_summary.csv")
+    pr = pd.read_csv(PG / "per_residue_wt_summary.csv")
 
     rho, p = fig_f1_vs_fitness(summ)
     fig_chance_control(summ, cc)
     tr, te = fig_holdout(ho)
-    pr = fig_per_residue(ho)
+    prm = fig_per_residue(pr)
 
     print("wrote pg_01..pg_04 to", OUTDIR)
     print(f"f1_per_domain vs signal: rho={rho:+.3f} p={p:.1e}")
     print(f"holdout: train-selected {tr:.3f} -> held-out test {te:.3f}")
-    print(f"per-residue (ours, concept-matched): {pr:.3f}  [MotifAE 0.41, plain SAE 0.33, ESM2]")
+    print(f"per-residue MotifAE pool (ours): {prm:.3f}  [MotifAE 0.41, plain SAE 0.33, ESM2]")
 
 
 if __name__ == "__main__":
