@@ -161,8 +161,9 @@ def analyze(output_dir: Path, maxact_path: Path, pairings_path: Path) -> None:
             "n_active30": int(len([f for f in active30 if is_live(f)])),
         })
     out = pd.DataFrame(rows)
-    out.to_csv(_REPO_ROOT / "data/proteingym/per_residue_wt_summary.csv", index=False)
-    print(f"\nper-residue WT, {len(out)} assays — median best-feature-per-assay |rho|:")
+    summary_path = output_dir.parent / f"{output_dir.name}_summary.csv"
+    out.to_csv(summary_path, index=False)
+    print(f"\nper-residue WT [{output_dir.name}], {len(out)} assays — median best-feature-per-assay |rho| ({summary_path.name}):")
     print(f"  [MotifAE per-residue best-match, ESM2: 0.41; plain SAE: 0.33]")
     for c in ["active30_best", "active30_paired_best", "active30_unpaired_best",
               "all_live_best", "live_paired_best", "live_unpaired_best", "dead_best"]:
