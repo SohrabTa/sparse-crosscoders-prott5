@@ -82,20 +82,26 @@ log.setLevel(logging.INFO)
 
 
 def load_crosscoder(crosscoder_dir: Path, checkpoint: str, device: str,
-                    inference_activation: str):
+                    inference_activation: str, jumprelu_threshold: str | None = None):
     """Load the crosscoder, optionally overriding the activation function the
     *native* crosscode way.
 
     The model serializes its activation in config.yaml as
         activation_fn: {classname: BatchTopkActivation, cfg: {k_per_example: 32}}
     and `ModelHookpointAcausalCrosscoder._scaffold_from_cfg` rebuilds it via
-    ACTIVATIONS_MAP. To run inference under per-token TopK instead of the
-    BatchTopK used at train time, we rewrite that block to
-        activation_fn: {classname: TopkActivation, cfg: {k: 32}}
-    before scaffolding. The activation function carries no learned parameters,
-    so the trained encoder/decoder/bias weights load onto either scaffold.
+    ACTIVATIONS_MAP. To run inference under a different gate we rewrite that block
+    before scaffolding:
+      topk     -> {classname: TopkActivation, cfg: {k: 32}} (per-token TopK).
+                  Parameter-free, so trained weights load onto either scaffold.
+      jumprelu -> {classname: AnthropicSTEJumpReLUActivation, cfg: {size, bandwidth}}.
+                  Carries a per-latent log_threshold_L parameter the BatchTopK
+                  checkpoint does NOT have, so scaffolding alone leaves it at its
+                  garbage init (exp(1)=2.72). We MUST inject log_threshold_L from
+                  the sidecar produced by convert_batchtopk_to_jumprelu.py. This is
+                  the easy-to-miss step that silently yields wrong activations.
 
-    `inference_activation="keep"` defers to InterPLM's load_sae unchanged.
+    `inference_activation="keep"` defers to InterPLM's load_sae unchanged (and is
+    also how you load an already-converted JumpReLU checkpoint dir).
     """
     if inference_activation == "keep":
         return load_sae(crosscoder_dir, device=device, model_name=checkpoint)
@@ -122,6 +128,18 @@ def load_crosscoder(crosscoder_dir: Path, checkpoint: str, device: str,
                 f"--inference_activation=topk but config activation is "
                 f"{act.get('classname')!r}; don't know how to map it."
             )
+    elif inference_activation == "jumprelu":
+        if jumprelu_threshold is None:
+            jumprelu_threshold = str(Path(crosscoder_dir) / "jumprelu_threshold.pt")
+        sidecar = torch.load(jumprelu_threshold, map_location="cpu", weights_only=False)
+        cfg["activation_fn"] = {
+            "classname": "AnthropicSTEJumpReLUActivation",
+            "cfg": {"size": cfg["n_latents"], "bandwidth": sidecar.get("bandwidth", 2.0)},
+        }
+        log.info("Native activation override: %s -> AnthropicSTEJumpReLUActivation "
+                 "(threshold mode=%s, theta=%.6g from %s)",
+                 act.get("classname"), sidecar.get("mode"), sidecar.get("theta", float("nan")),
+                 jumprelu_threshold)
 
     autoencoder = ModelHookpointAcausalCrosscoder._scaffold_from_cfg(cfg)
     wrapper = CrosscoderDictionaryWrapper(autoencoder)
@@ -132,11 +150,20 @@ def load_crosscoder(crosscoder_dir: Path, checkpoint: str, device: str,
         wrapper.load_state_dict(state_dict, strict=False)
     else:
         autoencoder.load_state_dict(state_dict, strict=False)
+
+    if inference_activation == "jumprelu":
+        # The BatchTopK state dict has no log_threshold_L; inject the estimated one.
+        log_threshold_L = sidecar["log_threshold_L"].to(device=device, dtype=torch.float32)
+        with torch.no_grad():
+            wrapper.crosscoder.activation_fn.log_threshold_L.copy_(log_threshold_L)
+
     wrapper.to(device)
     wrapper.eval()
     # Sanity: confirm the scaffold actually built the requested activation.
     from crosscode.models.activations.topk import TopkActivation
-    assert isinstance(wrapper.crosscoder.activation_fn, TopkActivation), (
+    from crosscode.models.activations.jumprelu import AnthropicSTEJumpReLUActivation
+    expected = {"topk": TopkActivation, "jumprelu": AnthropicSTEJumpReLUActivation}[inference_activation]
+    assert isinstance(wrapper.crosscoder.activation_fn, expected), (
         "native activation override did not bind"
     )
     return wrapper
@@ -480,14 +507,24 @@ def main():
     ap.add_argument(
         "--inference_activation",
         type=str,
-        choices=["keep", "topk"],
+        choices=["keep", "topk", "jumprelu"],
         default="keep",
         help="'keep' uses the activation function the crosscoder was trained with "
         "(BatchTopK in our case, where features compete for budget across all tokens "
         "in the batch — selection becomes batch-composition-dependent). "
         "'topk' swaps to per-token TopK at inference (same k as training): no "
         "batch competition, each token's active set depends only on its own pre-acts. "
+        "'jumprelu' swaps to a JumpReLU gate using a threshold estimated by "
+        "convert_batchtopk_to_jumprelu.py (see --jumprelu_threshold). "
         "Recommended when scoring DMS variants where batch composition is arbitrary.",
+    )
+    ap.add_argument(
+        "--jumprelu_threshold",
+        type=str,
+        default=None,
+        help="path to the jumprelu_threshold.pt sidecar from "
+        "convert_batchtopk_to_jumprelu.py; only used with --inference_activation "
+        "jumprelu. Defaults to <crosscoder_dir>/jumprelu_threshold.pt.",
     )
     args = ap.parse_args()
 
@@ -552,7 +589,8 @@ def main():
     # load_crosscoder(). "keep" uses the trained BatchTopK; "topk" runs per-token
     # TopK, removing the batch-composition dependence of which features fire.
     crosscoder = load_crosscoder(
-        args.crosscoder_dir, args.checkpoint, str(device), args.inference_activation
+        args.crosscoder_dir, args.checkpoint, str(device), args.inference_activation,
+        jumprelu_threshold=args.jumprelu_threshold,
     )
     crosscoder.eval()
 
