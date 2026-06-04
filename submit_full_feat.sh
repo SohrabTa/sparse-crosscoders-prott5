@@ -33,7 +33,9 @@ MOUNTS="${MOUNTS},${CKPT_DIR}:/workspace/model_checkpoints"
 MOUNTS="${MOUNTS},${CROSSCODE_DIR}:/workspace/crosscode"
 MOUNTS="${MOUNTS},${SCC_DIR}:/workspace/scc"
 
-CROSSCODER_DIR="/workspace/model_checkpoints/crosscoder_l8192_k32_bs512_full_2026-03-12_06-03-41/crashed_epoch_0_step_2519836"
+# --- re-run override (default = original full run) ---
+#   export RERUN_FULL_CKPT=/workspace/model_checkpoints/<new_full>/<final_or_crashed>_epoch_0_step_2519836
+CROSSCODER_DIR="${RERUN_FULL_CKPT:-/workspace/model_checkpoints/crosscoder_l8192_k32_bs512_full_2026-03-12_06-03-41/crashed_epoch_0_step_2519836}"
 MATCHES="/workspace/data/proteingym/concept_matches.csv"
 DMS_DIR="/workspace/data/DMS_ProteinGym_substitutions"
 OUTPUT_DIR="/workspace/data/proteingym/full_feature_spearman"

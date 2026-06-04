@@ -24,8 +24,12 @@ MOUNTS="${MOUNTS},${CKPT_DIR}:/workspace/model_checkpoints"
 MOUNTS="${MOUNTS},${CROSSCODE_DIR}:/workspace/crosscode"
 MOUNTS="${MOUNTS},${SCC_DIR}:/workspace/scc"
 
-CROSSCODER_DIR="/workspace/model_checkpoints/crosscoder_l8192_k32_bs512_full_2026-03-12_06-03-41/crashed_epoch_0_step_2519836"
-PAIRINGS="/workspace/InterPLM/results/crosscoder_eval/uniprotkb_modern_score45_67k/test_counts/heldout_all_top_pairings.csv"
+# --- re-run override (defaults = original full run). Export the new FULL checkpoint
+#     and the FULL-model pairings produced by submit_eval.sh:
+#       export RERUN_FULL_CKPT=/workspace/model_checkpoints/<new_full>/<final_or_crashed>_epoch_0_step_2519836
+#       export RERUN_PAIRINGS=/workspace/InterPLM/results/crosscoder_eval/uniprotkb_modern_score45_67k/test_counts/heldout_all_top_pairings.csv
+CROSSCODER_DIR="${RERUN_FULL_CKPT:-/workspace/model_checkpoints/crosscoder_l8192_k32_bs512_full_2026-03-12_06-03-41/crashed_epoch_0_step_2519836}"
+PAIRINGS="${RERUN_PAIRINGS:-/workspace/InterPLM/results/crosscoder_eval/uniprotkb_modern_score45_67k/test_counts/heldout_all_top_pairings.csv}"
 MATCHES="/workspace/data/proteingym/concept_matches.csv"
 DMS_DIR="/workspace/data/DMS_ProteinGym_substitutions"
 OUTPUT_DIR="/workspace/data/proteingym/pooled_metrics"
