@@ -5,24 +5,23 @@ Extends the per-residue-only score_proteingym_features.py to also save
 *sequence-pooled* statistics, which the prior analysis suggested may carry
 mutation-specific signal where the per-residue Δact does not.
 
-For each (variant, candidate feature) we compute, in BOTH gated (post-topk)
-and dense (pre-gate / linear+bias only) regimes:
+For each (variant, candidate feature) we compute the feature activation
+(post-BatchTopK — the only value the crosscoder emits):
 
-  *_at_pos          activation at the mutated residue (or centroid for
-                    multi-mutants)
-  *_delta_at_pos    act_mut[pos] − act_wt[pos]
-  *_pool_mean_abs   mean over the *whole sequence* of |act_mut[i] − act_wt[i]|
-  *_pool_max_abs    max  over the whole sequence of |act_mut[i] − act_wt[i]|
-  *_pool_mean_mut   mean over the whole sequence of act_mut[i]
-  *_pool_max_mut    max  over the whole sequence of act_mut[i]
+  at_pos          activation at the mutated residue (or centroid for
+                  multi-mutants)
+  delta_at_pos    act_mut[pos] − act_wt[pos]
+  pool_mean_abs   mean over the *whole sequence* of |act_mut[i] − act_wt[i]|
+  pool_max_abs    max  over the whole sequence of |act_mut[i] − act_wt[i]|
+  pool_mean_mut   mean over the whole sequence of act_mut[i]
+  pool_max_mut    max  over the whole sequence of act_mut[i]
 
 Output (per assay):
     <output_dir>/<DMS_id>__pooled.parquet
       long-format, one row per (variant, feature) across all matched concepts
       for the assay. Includes DMS_score, position, n_mutations, feature, the
-      8 g_* and 8 d_* metrics, plus fire_rate_gated / fire_rate_dense aggregated
-      across the whole sequence (fraction of positions where the feature is
-      non-zero).
+      6 metrics, plus fire_rate aggregated across the whole sequence (fraction
+      of positions where the feature is non-zero).
 
 After harvest is complete, run:
     --compute_summary   pass to also write per-(assay,concept,feature)
@@ -78,21 +77,14 @@ POOLED_SCHEMA = pa.schema([
     ("n_mutations", pa.int16()),
     ("DMS_score", pa.float32()),
     ("feature", pa.int32()),
-    ("g_at_pos_wt", pa.float32()),
-    ("g_at_pos_mut", pa.float32()),
-    ("g_delta_at_pos", pa.float32()),
-    ("g_pool_mean_abs", pa.float32()),
-    ("g_pool_max_abs", pa.float32()),
-    ("g_pool_mean_mut", pa.float32()),
-    ("g_pool_max_mut", pa.float32()),
-    ("fire_rate_gated_var", pa.float32()),
-    ("d_at_pos_wt", pa.float32()),
-    ("d_at_pos_mut", pa.float32()),
-    ("d_delta_at_pos", pa.float32()),
-    ("d_pool_mean_abs", pa.float32()),
-    ("d_pool_max_abs", pa.float32()),
-    ("d_pool_mean_mut", pa.float32()),
-    ("d_pool_max_mut", pa.float32()),
+    ("at_pos_wt", pa.float32()),
+    ("at_pos_mut", pa.float32()),
+    ("delta_at_pos", pa.float32()),
+    ("pool_mean_abs", pa.float32()),
+    ("pool_max_abs", pa.float32()),
+    ("pool_mean_mut", pa.float32()),
+    ("pool_max_mut", pa.float32()),
+    ("fire_rate_var", pa.float32()),
 ])
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -141,24 +133,21 @@ def load_candidate_features(
 @torch.no_grad()
 def encode_full_features(
     crosscoder, x: torch.Tensor, feat_idx: torch.Tensor, device: torch.device
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Run encoder linear + bias, return (gated, dense) per-residue activations
+) -> np.ndarray:
+    """Run the encoder and return per-residue feature activations (post-BatchTopK)
     restricted to the feature subset.
 
     x: [L_seq, 1, 24, 1024] (the ProtT5 embedder's "batch" dim is amino-acid tokens)
     feat_idx: 1D tensor of feature indices
 
     Returns:
-        gated: (L_seq, n_feats) float32 — after activation_fn (BatchTopK at inference)
-        dense: (L_seq, n_feats) float32 — pre-gate (encoder linear + bias only)
+        act: (L_seq, n_feats) float32 — after activation_fn (BatchTopK at inference)
     """
     inner = crosscoder.crosscoder
     pre = inner.get_pre_bias_BL(x.to(device=device, dtype=next(inner.parameters()).dtype))
     if inner.b_enc_L is not None:
         pre = pre + inner.b_enc_L
-    dense = pre[:, feat_idx].float().cpu().numpy()
-    gated = inner.activation_fn.forward(pre)[:, feat_idx].float().cpu().numpy()
-    return gated, dense
+    return inner.activation_fn.forward(pre)[:, feat_idx].float().cpu().numpy()
 
 
 def harvest_one_assay(
@@ -217,10 +206,9 @@ def harvest_one_assay(
 
     # WT activations (full per-residue, for the union feature subset)
     wt_emb = embedder.extract_embeddings([wt_seq_str], batch_size=1)  # (L_wt, 1, 24, 1024)
-    wt_gated, wt_dense = encode_full_features(crosscoder, wt_emb, feat_idx, device)
+    wt_act = encode_full_features(crosscoder, wt_emb, feat_idx, device)
     # (L_wt, n_union)
-    wt_fire_gated = (wt_gated != 0).astype(np.float32)
-    L_wt = wt_gated.shape[0]
+    L_wt = wt_act.shape[0]
 
     # Streaming write: open a ParquetWriter on the first non-empty batch and
     # append one row-group per batch. Peak memory is bounded by the largest
@@ -241,7 +229,7 @@ def harvest_one_assay(
             )
             emb_all = bundle["embeddings"]
             boundaries = bundle["boundaries"]
-            all_gated, all_dense = encode_full_features(
+            all_act = encode_full_features(
                 crosscoder, emb_all, feat_idx, device
             )
 
@@ -250,27 +238,18 @@ def harvest_one_assay(
                 parsed = parse_mutant_positions(str(vrow["mutant"]))
                 if not parsed:
                     continue
-                mut_gated = all_gated[b_start:b_end]  # (L_var, n_union)
-                mut_dense = all_dense[b_start:b_end]
-                L_var = mut_gated.shape[0]
+                mut_act = all_act[b_start:b_end]  # (L_var, n_union)
+                L_var = mut_act.shape[0]
                 L_cmp = min(L_var, L_wt)
-                dg = mut_gated[:L_cmp] - wt_gated[:L_cmp]
-                dd = mut_dense[:L_cmp] - wt_dense[:L_cmp]
-                mg = mut_gated[:L_cmp]
-                md = mut_dense[:L_cmp]
-                wg = wt_gated[:L_cmp]
-                wd = wt_dense[:L_cmp]
-                adg = np.abs(dg)
-                add = np.abs(dd)
-                g_pool_mean_abs = adg.mean(axis=0)
-                g_pool_max_abs  = adg.max(axis=0)
-                g_pool_mean_mut = mg.mean(axis=0)
-                g_pool_max_mut  = mg.max(axis=0)
-                d_pool_mean_abs = add.mean(axis=0)
-                d_pool_max_abs  = add.max(axis=0)
-                d_pool_mean_mut = md.mean(axis=0)
-                d_pool_max_mut  = md.max(axis=0)
-                fire_gated_var = (mg != 0).astype(np.float32).mean(axis=0)
+                d = mut_act[:L_cmp] - wt_act[:L_cmp]
+                m = mut_act[:L_cmp]
+                w = wt_act[:L_cmp]
+                ad = np.abs(d)
+                pool_mean_abs = ad.mean(axis=0)
+                pool_max_abs  = ad.max(axis=0)
+                pool_mean_mut = m.mean(axis=0)
+                pool_max_mut  = m.max(axis=0)
+                fire_var = (m != 0).astype(np.float32).mean(axis=0)
                 n_mut = len(parsed)
                 positions = [p for _, p, _ in parsed if 0 <= p - 1 < L_cmp]
                 if not positions:
@@ -279,8 +258,7 @@ def harvest_one_assay(
                 mutant_str = str(vrow["mutant"])
                 dms_score = float(vrow["DMS_score"])
                 for pos in positions:
-                    gi = wg[pos - 1]; gj = mg[pos - 1]; dgi = dg[pos - 1]
-                    di = wd[pos - 1]; dj = md[pos - 1]; ddi = dd[pos - 1]
+                    wi = w[pos - 1]; mi = m[pos - 1]; di = d[pos - 1]
                     for feat in union_feats:
                         i = feat_to_idx[feat]
                         batch_rows.append({
@@ -291,21 +269,14 @@ def harvest_one_assay(
                             "n_mutations": n_mut,
                             "DMS_score": dms_score,
                             "feature": int(feat),
-                            "g_at_pos_wt": float(gi[i]),
-                            "g_at_pos_mut": float(gj[i]),
-                            "g_delta_at_pos": float(dgi[i]),
-                            "g_pool_mean_abs": float(g_pool_mean_abs[i]),
-                            "g_pool_max_abs":  float(g_pool_max_abs[i]),
-                            "g_pool_mean_mut": float(g_pool_mean_mut[i]),
-                            "g_pool_max_mut":  float(g_pool_max_mut[i]),
-                            "fire_rate_gated_var": float(fire_gated_var[i]),
-                            "d_at_pos_wt": float(di[i]),
-                            "d_at_pos_mut": float(dj[i]),
-                            "d_delta_at_pos": float(ddi[i]),
-                            "d_pool_mean_abs": float(d_pool_mean_abs[i]),
-                            "d_pool_max_abs":  float(d_pool_max_abs[i]),
-                            "d_pool_mean_mut": float(d_pool_mean_mut[i]),
-                            "d_pool_max_mut":  float(d_pool_max_mut[i]),
+                            "at_pos_wt": float(wi[i]),
+                            "at_pos_mut": float(mi[i]),
+                            "delta_at_pos": float(di[i]),
+                            "pool_mean_abs": float(pool_mean_abs[i]),
+                            "pool_max_abs":  float(pool_max_abs[i]),
+                            "pool_mean_mut": float(pool_mean_mut[i]),
+                            "pool_max_mut":  float(pool_max_mut[i]),
+                            "fire_rate_var": float(fire_var[i]),
                         })
 
             if batch_rows:
@@ -341,10 +312,8 @@ def compute_summary(output_dir: Path, matches_path: Path, pairings_path: Path) -
 
     summary_rows = []
     metric_cols = [
-        "g_at_pos_mut", "g_delta_at_pos", "g_pool_mean_abs", "g_pool_max_abs",
-        "g_pool_mean_mut", "g_pool_max_mut",
-        "d_at_pos_mut", "d_delta_at_pos", "d_pool_mean_abs", "d_pool_max_abs",
-        "d_pool_mean_mut", "d_pool_max_mut",
+        "at_pos_mut", "delta_at_pos", "pool_mean_abs", "pool_max_abs",
+        "pool_mean_mut", "pool_max_mut",
     ]
     # Build per-(assay, feature) → list of concepts mapping
     concept_set: Dict[Tuple[str, int], List[str]] = defaultdict(list)
@@ -370,7 +339,7 @@ def compute_summary(output_dir: Path, matches_path: Path, pairings_path: Path) -
                     "feature": int(feat),
                     "n_variants": int(g["mutant"].nunique()),
                     "n_rows": int(len(g)),
-                    "fire_rate_gated_mean": float(g["fire_rate_gated_var"].mean()),
+                    "fire_rate_mean": float(g["fire_rate_var"].mean()),
                     "f1_per_domain": f1map.get((concept, int(feat)), float("nan"))
                                        if concept else float("nan"),
                 }

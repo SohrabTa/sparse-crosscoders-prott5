@@ -2,7 +2,7 @@
 Position-residualized Spearman on the pooled-metrics parquets.
 
 For each (assay, concept, feature) we currently report a *global* Spearman
-between a per-variant metric (e.g. d_pool_mean_abs) and DMS_score. That number
+between a per-variant metric (e.g. pool_mean_abs) and DMS_score. That number
 mixes two signals:
   - position importance: at conserved sites *any* substitution is bad,
     so variants at those sites have both extreme metric values and extreme
@@ -91,10 +91,8 @@ def main():
             concept_set[(r["DMS_id"], int(f))].append(r["matched_concept"])
 
     metric_cols = [
-        "g_delta_at_pos", "g_at_pos_mut", "g_pool_mean_abs", "g_pool_max_abs",
-        "g_pool_mean_mut", "g_pool_max_mut",
-        "d_delta_at_pos", "d_at_pos_mut", "d_pool_mean_abs", "d_pool_max_abs",
-        "d_pool_mean_mut", "d_pool_max_mut",
+        "delta_at_pos", "at_pos_mut", "pool_mean_abs", "pool_max_abs",
+        "pool_mean_mut", "pool_max_mut",
     ]
 
     parquets = sorted(args.pooled_dir.glob("*__pooled.parquet"))
@@ -183,7 +181,7 @@ def main():
               f"{(v_raw>0.3).sum():>8d}  {(v_resid>0.3).sum():>10d}  {(v_resid>0.5).sum():>10d}")
 
     print("\n=== Best feature per (assay,concept) ===")
-    for col in ["g_pool_mean_abs", "d_pool_mean_abs"]:
+    for col in ["pool_mean_abs"]:
         rawcol, residcol = f"{col}_raw", f"{col}_resid"
         best_raw = out.assign(absx=lambda d: d[rawcol].abs()).sort_values(
             "absx", ascending=False).drop_duplicates(["DMS_id","concept"])
