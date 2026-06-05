@@ -1,6 +1,6 @@
 """Two literature-grounded ProteinGym analyses on the paired-feature pooled parquets.
 
-A) Per-residue MotifAE-comparable readout (Hu et al. 2025).
+A) Per-residue MotifAE-comparable readout (Hou et al. 2025).
    For each (assay, candidate feature) correlate the feature's per-residue WT activation a[p]
    against the per-residue mean mutation effect m[p] (mean DMS_score over substitutions at p,
    positions with >= MIN_SUBS substitutions). Spearman across positions; best feature per assay.

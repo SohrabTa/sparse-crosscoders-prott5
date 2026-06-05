@@ -1,6 +1,6 @@
 """Per-residue MotifAE-comparable readout — WT-only, all 8192 features.
 
-Replicates MotifAE's (Hu et al. 2025) feature-vs-DMS setup as closely as we can, to give an
+Replicates MotifAE's (Hou et al. 2025) feature-vs-DMS setup as closely as we can, to give an
 apples-to-apples comparison instead of our concept-matched-only number:
 
   - per RESIDUE (not per variant): correlate a feature's WT activation a[p] against the per-residue
@@ -82,7 +82,8 @@ def encode_wt(crosscoder, x, device) -> np.ndarray:
     return inner.activation_fn.forward(pre).float().cpu().numpy()
 
 
-def harvest_one(dms_id, dms_dir, embedder, crosscoder, n_latents, device):
+def harvest_one(dms_id, dms_dir, embedder, crosscoder, n_latents, device,
+                live_idx=None, n_perm=0, rng=None, null_out=None):
     dms_path = dms_dir / f"{dms_id}.csv"
     if not dms_path.exists():
         log.error("  DMS missing: %s", dms_path); return None
@@ -117,10 +118,35 @@ def harvest_one(dms_id, dms_dir, embedder, crosscoder, n_latents, device):
     rm_norm = np.sqrt((rm_c ** 2).sum())
     rA = pd.DataFrame(A.astype(np.float64)).rank().to_numpy()   # (n_pos, 8192), avg ties per column
     rA_c = rA - rA.mean(axis=0, keepdims=True)
-    denom = np.sqrt((rA_c ** 2).sum(axis=0)) * rm_norm          # 0 for constant features / constant m
+    colnorm = np.sqrt((rA_c ** 2).sum(axis=0))                  # 0 for constant features
     with np.errstate(invalid="ignore", divide="ignore"):
-        rhos = (rA_c.T @ rm_c) / denom                          # (8192,)
+        rhos = (rA_c.T @ rm_c) / (colnorm * rm_norm)            # (8192,)
     rhos = np.where(np.isfinite(rhos), rhos, np.nan).astype(np.float32)
+
+    # Check 2 — permutation-max null: shuffle m, recompute the best-of-N |rho| over the live (and
+    # >=30%-active) features. If the observed best is not above this null, the per-residue number is
+    # just selection over many features (Churchill-Doerge / Westfall-Young max-statistic).
+    if n_perm and rng is not None and live_idx is not None and null_out is not None:
+        absr = np.abs(rhos)
+        live = np.asarray(live_idx)
+        a30 = np.where(frac_active >= ACTIVE_FRAC)[0]
+        nl, na = [], []
+        for _ in range(n_perm):
+            rmb_c = pd.Series(rng.permutation(m)).rank().to_numpy(dtype=np.float64)
+            rmb_c = rmb_c - rmb_c.mean()
+            with np.errstate(invalid="ignore", divide="ignore"):
+                rb = np.abs((rA_c.T @ rmb_c) / (colnorm * np.sqrt((rmb_c ** 2).sum())))
+            rb = np.where(np.isfinite(rb), rb, 0.0)
+            nl.append(rb[live].max() if len(live) else np.nan)
+            na.append(rb[a30].max() if len(a30) else np.nan)
+        null_out.append({
+            "DMS_id": dms_id,
+            "obs_live": float(np.nanmax(absr[live])) if len(live) else np.nan,
+            "null_live_p95": float(np.nanpercentile(nl, 95)),
+            "obs_active30": float(np.nanmax(absr[a30])) if len(a30) else np.nan,
+            "null_active30_p95": float(np.nanpercentile(na, 95)),
+            "n_perm": int(n_perm),
+        })
     return pd.DataFrame({"DMS_id": dms_id, "feature": np.arange(n_latents),
                          "spearman": rhos, "frac_active": frac_active.astype(np.float32),
                          "n_pos": int(len(good))})
@@ -185,8 +211,17 @@ def main():
     ap.add_argument("--device", type=str, default=None)
     ap.add_argument("--skip_existing", action="store_true")
     ap.add_argument("--analyze_only", action="store_true")
+    ap.add_argument("--permute", type=int, default=0,
+                    help="Check 2: permutation-max null with this many shuffles (forces forwards)")
     args = ap.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
+
+    live_idx, rng, null_out = None, None, None
+    if args.permute:
+        maxact = torch.load(args.maxact, map_location="cpu").numpy()
+        live_idx = np.where(maxact != 0)[0]
+        rng = np.random.default_rng(0)
+        null_out = []
 
     if not args.analyze_only:
         matches = pd.read_csv(args.matches)
@@ -210,16 +245,29 @@ def main():
 
         for i, dms_id in enumerate(assay_ids):
             out_path = args.output_dir / f"{dms_id}__per_res_wt.parquet"
-            if args.skip_existing and out_path.exists():
+            # --permute needs the WT forward (the activation matrix), so don't skip in that mode.
+            if args.skip_existing and out_path.exists() and not args.permute:
                 continue
             log.info("[%d/%d] %s", i + 1, len(assay_ids), dms_id)
             try:
-                df = harvest_one(dms_id, args.dms_dir, embedder, crosscoder, n_latents, device)
+                df = harvest_one(dms_id, args.dms_dir, embedder, crosscoder, n_latents, device,
+                                 live_idx=live_idx, n_perm=args.permute, rng=rng, null_out=null_out)
             except Exception as e:
                 log.exception("  failed: %s", e); continue
             if df is not None:
                 df.to_parquet(out_path, index=False)
             gc.collect()
+
+    if null_out is not None:
+        nd = pd.DataFrame(null_out)
+        null_path = args.output_dir.parent / f"{args.output_dir.name}_permnull.csv"
+        nd.to_csv(null_path, index=False)
+        print(f"\ncheck 2 — permutation-max null ({args.permute} shuffles), {len(nd)} assays ({null_path.name}):")
+        for obs, nul in [("obs_active30", "null_active30_p95"), ("obs_live", "null_live_p95")]:
+            o, n = nd[obs].dropna(), nd[nul].dropna()
+            sig = int((nd[obs] > nd[nul]).sum())
+            print(f"  {obs:<13s} median obs {o.median():.3f}  vs  null-p95 median {n.median():.3f}   "
+                  f"(obs>null-p95 in {sig}/{len(nd)} assays)")
 
     analyze(args.output_dir, args.maxact, args.pairings)
 
