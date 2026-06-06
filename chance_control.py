@@ -77,6 +77,8 @@ def main() -> None:
             "live_median": float(rho.reindex(sorted(live)).median()),
         })
 
+    df = pd.DataFrame(rows)
+
     # Random-init-model null (SAEBench/InterPLM convention): best feature per assay from the
     # crosscoder trained on a randomly-initialized ProtT5. Auto-included once the cluster job
     # (submit_baseline_proteingym.sh) has written this CSV.
