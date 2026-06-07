@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 
@@ -53,28 +52,11 @@ sys.path.insert(0, str(_REPO_ROOT / "repos" / "crosscode"))
 sys.path.insert(0, str(_HERE.parent))
 
 from convert_batchtopk_to_jumprelu import (  # noqa: E402
+    embed_fasta_to_shards,
     iter_activation_batches,
     load_batchtopk_crosscoder,
     pre_activation_BL,
 )
-
-
-def _embed_fasta_to_dir(fasta: Path, out_dir: Path, device: str) -> Path:
-    """Embed sequences via the pipeline embedder into one [N,1,24,1024] shard."""
-    from interplm.embedders.prott5 import ProtT5CrosscoderEmbedder
-
-    text = fasta.read_text()
-    if text.lstrip().startswith(">"):
-        seqs = re.split(r"^>.*$", text, flags=re.MULTILINE)
-        seqs = ["".join(s.split()) for s in seqs if s.strip()]
-    else:
-        seqs = [l.strip() for l in text.splitlines() if l.strip()]
-    print(f"embedding {len(seqs)} sequences via ProtT5CrosscoderEmbedder ...")
-    emb = ProtT5CrosscoderEmbedder(device=device)
-    acts = emb.extract_embeddings(seqs, batch_size=4)  # (N,1,24,1024)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(acts.to(torch.float32).contiguous(), out_dir / "shard_0.pt")
-    return out_dir
 
 
 @torch.no_grad()
@@ -103,7 +85,10 @@ def main() -> None:
     if args.activations is None:
         if args.fasta is None:
             ap.error("provide --activations or --fasta")
-        args.activations = _embed_fasta_to_dir(args.fasta, args.crosscoder_dir / "_verify_acts", device)
+        args.activations = embed_fasta_to_shards(
+            args.fasta, args.crosscoder_dir / "_verify_acts", device,
+            max_tokens=args.batch_tokens * (args.max_batches + 1),
+        )
 
     _, inner = load_batchtopk_crosscoder(args.crosscoder_dir, args.checkpoint, device)
     dtype = next(inner.parameters()).dtype
