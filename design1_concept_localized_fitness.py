@@ -26,9 +26,18 @@ NULLS (the whole point — the old readout had none):
   B) within-sequence mask permutation: draw k random positions as a pseudo-firing set, AUC,
      repeat N_PERM. Controls the protein's own dev distribution.
 
-NOTE / TODO (not in smoke): conservation matching. Functional residues are intrinsically more
-mutation-sensitive; null A partially controls it (real + random features share the protein's
-conservation landscape) but a positions-matched-on-entropy null would be stricter. Flag in the doc.
+CONFOUND CONTROLS (the point/site concepts have a sharp one — amino-acid identity):
+  C) AA-identity-restricted AUC: restrict both groups to positions whose WT residue is one the
+     feature fires on (disulfide -> cysteines), then ask whether the FIRING residues have higher
+     |effect| than non-firing residues OF THE SAME TYPE. This defuses "it just detects cysteines"
+     — the identity prior that survives even a random-init model (InterPLM). No extra data needed.
+     Degenerate (auc_id=nan) when the feature fires on ~all residues of its type — itself the
+     finding that the label is identity-level, not function-level.
+  D) Conservation-residualized AUC + conservation-stratified mask null: with --conservation
+     <CSV: DMS_id,pos,score> (per-position MSA Shannon entropy from harvest_msa_conservation.py),
+     rank-residualize |effect| on conservation and recompute AUC; the stratified null matches the
+     firing set's conservation distribution. Asks for fitness importance BEYOND conservation.
+     Optional — the MSA files are not local (ProteinGym download); the hook is ready for them.
 
 INPUTS (read-only):
   --crosscoder_dir   <ckpt>/  (load_sae -> BatchTopK crosscoder)        [ae_normalized.pt]
@@ -101,19 +110,64 @@ def auc_from_firing(rank_dev: np.ndarray, fire_mask: np.ndarray) -> float:
     return U / (k * (n - k))
 
 
-def auc_for_counts(rank_dev_sorted_cumsum, rank_dev: np.ndarray, ks: np.ndarray,
-                   rng: np.random.Generator, n_draws: int) -> np.ndarray:
-    """Mask-permutation AUCs for a vector of k values (one draw each)."""
-    n = len(rank_dev)
-    out = np.full(len(ks), np.nan)
-    for i, k in enumerate(ks):
-        k = int(k)
-        if k < 2 or k > n - 2:
-            continue
-        idx = rng.choice(n, size=k, replace=False)
-        U = rank_dev[idx].sum() - k * (k + 1) / 2.0
-        out[i] = U / (k * (n - k))
-    return out
+def auc_from_ranks(rank_vals: np.ndarray, mask: np.ndarray) -> float:
+    """AUC = P(val[mask] > val[~mask]) from precomputed ranks over the full set."""
+    n = len(rank_vals)
+    k = int(mask.sum())
+    if k < 2 or k > n - 2:
+        return np.nan
+    R = float(rank_vals[mask].sum())
+    return (R - k * (k + 1) / 2.0) / (k * (n - k))
+
+
+def mask_perm_p(rank_vals: np.ndarray, k: int, auc_obs: float,
+                rng: np.random.Generator, n_perm: int,
+                strata: np.ndarray = None) -> tuple[float, float]:
+    """Mask-permutation null: draw k positions (optionally stratified to match a covariate's
+    distribution over the firing set) and recompute AUC. Returns (p95, empirical_p)."""
+    n = len(rank_vals)
+    if k < 2 or k > n - 2:
+        return (np.nan, np.nan)
+    aucs = []
+    if strata is None:
+        for _ in range(n_perm):
+            msk = np.zeros(n, bool); msk[rng.choice(n, size=k, replace=False)] = True
+            aucs.append(auc_from_ranks(rank_vals, msk))
+    else:
+        # match the firing set's per-stratum counts (set externally via strata == firing strata)
+        bin_ids, bin_counts = strata
+        for _ in range(n_perm):
+            sel = []
+            for b, c in bin_counts.items():
+                pool = np.where(bin_ids == b)[0]
+                sel.extend(rng.choice(pool, size=min(c, len(pool)), replace=False))
+            msk = np.zeros(n, bool); msk[np.asarray(sel, int)] = True
+            aucs.append(auc_from_ranks(rank_vals, msk))
+    aucs = np.array([a for a in aucs if np.isfinite(a)])
+    if not len(aucs):
+        return (np.nan, np.nan)
+    return (float(np.percentile(aucs, 95)), float((aucs >= auc_obs).mean()))
+
+
+def restricted_auc(dev: np.ndarray, wt_aa: np.ndarray, fire: np.ndarray) -> tuple[float, int, int]:
+    """AA-identity-restricted AUC: among positions whose WT residue is one the feature fires on
+    (e.g. only cysteines for a disulfide feature), do the FIRING positions have higher |effect|
+    than the non-firing ones? Defuses 'it just detects the residue type' — the identity prior that
+    survives even in a random-init model. Returns (auc, n_subset, k_in_subset)."""
+    aa_fire = set(wt_aa[fire].tolist())
+    sub = np.isin(wt_aa, list(aa_fire))
+    n_sub = int(sub.sum())
+    rd = rankdata(dev[sub])
+    fmask = fire[sub]
+    return (auc_from_ranks(rd, fmask), n_sub, int(fmask.sum()))
+
+
+def residualize(dev: np.ndarray, cov: np.ndarray) -> np.ndarray:
+    """Rank-residualize |effect| on a covariate (conservation): rank(dev) minus its linear fit on
+    rank(cov). AUC on the residual asks for fitness importance BEYOND what conservation explains."""
+    rd, rc = rankdata(dev), rankdata(cov)
+    a, b = np.polyfit(rc, rd, 1)
+    return rd - (a * rc + b)
 
 
 def load_live_mask(maxact_path: Path, n_latents: int) -> np.ndarray:
@@ -147,6 +201,10 @@ def main() -> None:
     ap.add_argument("--dms_dir", type=Path, required=True)
     ap.add_argument("--maxact", type=Path, required=True)
     ap.add_argument("--output_dir", type=Path, required=True)
+    ap.add_argument("--conservation", type=Path, default=None,
+                    help="optional CSV (DMS_id,pos,score) of per-position conservation (e.g. MSA "
+                         "Shannon entropy from harvest_msa_conservation.py); higher score = more "
+                         "variable. Enables the conservation-residualized AUC + stratified null.")
     ap.add_argument("--assays", type=str, default=None, help="comma-separated DMS_ids to restrict to")
     ap.add_argument("--max_seq_len", type=int, default=2048)
     ap.add_argument("--device", type=str, default=None)
@@ -161,6 +219,13 @@ def main() -> None:
     device = args.device or ("cuda" if torch.cuda.is_available()
                              else "mps" if torch.backends.mps.is_available() else "cpu")
     log.info("device=%s", device)
+
+    cons_map = {}
+    if args.conservation:
+        cons_df = pd.read_csv(args.conservation)
+        for did, g in cons_df.groupby("DMS_id"):
+            cons_map[did] = dict(zip(g["pos"].astype(int), g["score"].astype(float)))
+        log.info("conservation loaded for %d assays", len(cons_map))
 
     matches = pd.read_csv(args.matches)
     labelled = labelled_point_site_features(matches)
@@ -207,6 +272,25 @@ def main() -> None:
         dev = np.abs(m - np.median(m))
         rank_dev = rankdata(dev)                       # 1..n_pos, avg ties
         n_pos = len(good)
+        wt_aa = np.array(list(wt_str))[pos0]           # WT residue at each scored position
+
+        # optional per-position conservation aligned to the scored positions (1-indexed)
+        cons = None
+        if dms_id in cons_map:
+            cvals = np.array([cons_map[dms_id].get(int(p), np.nan) for p in good.values])
+            if np.isfinite(cvals).sum() >= MIN_POS:
+                cons = cvals
+        rank_resid = None
+        cons_strata = None
+        if cons is not None:
+            ok_c = np.isfinite(cons)
+            # residualized |effect| ranks (NaN conservation positions kept at rank-residual 0)
+            rr = np.zeros(n_pos)
+            rr[ok_c] = rankdata(residualize(dev[ok_c], cons[ok_c]))
+            rank_resid = rr
+            bins = pd.qcut(rankdata(np.where(ok_c, cons, np.nanmedian(cons))),
+                           q=min(5, max(2, ok_c.sum() // 5)), labels=False, duplicates="drop")
+            cons_strata = bins
 
         wt_act = encode_wt(crosscoder, embedder.extract_embeddings([wt_str], batch_size=1), device)
         A = wt_act[pos0, :]                             # (n_pos, 8192) at scored positions
@@ -215,7 +299,8 @@ def main() -> None:
         # density-matched live pool, recomputed per labelled feature's k below
         live_k = fire_counts[live_idx]
 
-        log.info("  %s: L=%d  n_pos=%d  labelled=%d", dms_id, L, n_pos, len(grp))
+        log.info("  %s: L=%d  n_pos=%d  labelled=%d  cons=%s", dms_id, L, n_pos, len(grp),
+                 "yes" if cons is not None else "no")
         for _, row in grp.iterrows():
             f = int(row["feature"])
             fire = A[:, f] > 0
@@ -224,13 +309,12 @@ def main() -> None:
             rec = {"DMS_id": dms_id, "concept": row["concept"], "feature": f,
                    "n_pos": n_pos, "k_fire": k, "auc_obs": auc_obs}
             if not np.isfinite(auc_obs):
-                rec.update(nullA_n=0, nullA_mean=np.nan, nullA_p=np.nan, nullA_z=np.nan,
-                           nullB_p95=np.nan, nullB_p=np.nan, status="degenerate_k")
-                results.append(rec);
+                rec.update(status="degenerate_k")
+                results.append(rec)
                 if args.smoke: log.info("    f%d concept=%s k=%d  AUC=nan (degenerate)", f, row["concept"], k)
                 continue
 
-            # Null A: nearest-k live features (exclude the labelled feature itself)
+            # Null A: density-matched random live features (nearest-k, exclude the labelled feature)
             order = np.argsort(np.abs(live_k - k))
             pool = [int(live_idx[j]) for j in order if int(live_idx[j]) != f][:N_NULL_FEATURES]
             aucA = np.array([auc_from_firing(rank_dev, A[:, g] > 0) for g in pool])
@@ -240,19 +324,39 @@ def main() -> None:
             nullA_z = float((auc_obs - nullA_mean) / (np.std(aucA) + 1e-9)) if len(aucA) > 1 else np.nan
             realized_k = float(np.median(fire_counts[pool])) if pool else np.nan
 
-            # Null B: mask permutation at fixed k
-            aucB = auc_for_counts(None, rank_dev, np.full(N_PERM, k), rng, N_PERM)
-            aucB = aucB[np.isfinite(aucB)]
-            nullB_p95 = float(np.percentile(aucB, 95)) if len(aucB) else np.nan
-            nullB_p = float((aucB >= auc_obs).mean()) if len(aucB) else np.nan
+            # Null B: within-sequence mask permutation at fixed k
+            nullB_p95, nullB_p = mask_perm_p(rank_dev, k, auc_obs, rng, N_PERM)
+
+            # AA-identity-restricted AUC (compares firing vs non-firing positions of the SAME WT
+            # residue type) + its own mask-permutation p within that subset
+            auc_id, n_id, k_id = restricted_auc(dev, wt_aa, fire)
+            aa_fire = set(wt_aa[fire].tolist())
+            sub = np.isin(wt_aa, list(aa_fire))
+            nullID_p = np.nan
+            if np.isfinite(auc_id):
+                _, nullID_p = mask_perm_p(rankdata(dev[sub]), k_id, auc_id, rng, N_PERM)
+
+            # Conservation-residualized AUC + conservation-stratified mask null (only if --conservation)
+            auc_cr, nullCons_p = np.nan, np.nan
+            if rank_resid is not None:
+                auc_cr = auc_from_ranks(rank_resid, fire)
+                if np.isfinite(auc_cr) and cons_strata is not None:
+                    bc = pd.Series(cons_strata[fire]).value_counts().to_dict()
+                    _, nullCons_p = mask_perm_p(rank_resid, k, auc_cr, rng, N_PERM,
+                                                strata=(cons_strata, bc))
 
             rec.update(nullA_n=len(aucA), nullA_mean=nullA_mean, nullA_p=nullA_p, nullA_z=nullA_z,
-                       nullA_median_k=realized_k, nullB_p95=nullB_p95, nullB_p=nullB_p, status="ok")
+                       nullA_median_k=realized_k, nullB_p95=nullB_p95, nullB_p=nullB_p,
+                       auc_id=auc_id, n_id=n_id, k_id=k_id, nullID_p=nullID_p,
+                       auc_consresid=auc_cr, nullCons_p=nullCons_p, status="ok")
             results.append(rec)
             if args.smoke:
-                log.info("    f%d %s  k=%d/%d  AUC=%.3f  nullA mean=%.3f p=%.3f z=%.2f (k~%.0f)  nullB p95=%.3f p=%.3f",
-                         f, row["concept"], k, n_pos, auc_obs, nullA_mean, nullA_p, nullA_z,
-                         realized_k, nullB_p95, nullB_p)
+                log.info("    f%d %s k=%d/%d AUC=%.3f | nullA m=%.3f p=%.3f z=%.2f | nullB p=%.3f | "
+                         "ID-restr AUC=%.3f (n=%d,k=%d) p=%.3f | consResid AUC=%s p=%s",
+                         f, row["concept"], k, n_pos, auc_obs, nullA_mean, nullA_p, nullA_z, nullB_p,
+                         auc_id, n_id, k_id, nullID_p,
+                         f"{auc_cr:.3f}" if np.isfinite(auc_cr) else "na",
+                         f"{nullCons_p:.3f}" if np.isfinite(nullCons_p) else "na")
 
     out = pd.DataFrame(results)
     out_path = args.output_dir / "design1_per_feature.csv"
@@ -260,10 +364,18 @@ def main() -> None:
     log.info("wrote %s (%d rows)", out_path, len(out))
     ok = out[out["status"] == "ok"] if "status" in out else out
     if len(ok):
+        idok = ok[ok["auc_id"].notna()]
         log.info("\n=== summary (status=ok, %d rows) ===", len(ok))
         log.info("median AUC_obs=%.3f  median nullA_mean=%.3f  frac nullA_p<0.05=%.2f  frac nullB_p<0.05=%.2f",
                  ok["auc_obs"].median(), ok["nullA_mean"].median(),
                  (ok["nullA_p"] < 0.05).mean(), (ok["nullB_p"] < 0.05).mean())
+        if len(idok):
+            log.info("ID-restricted: %d rows  median AUC_id=%.3f  frac nullID_p<0.05=%.2f",
+                     len(idok), idok["auc_id"].median(), (idok["nullID_p"] < 0.05).mean())
+        if ok["auc_consresid"].notna().any():
+            cr = ok[ok["auc_consresid"].notna()]
+            log.info("cons-residualized: %d rows  median AUC=%.3f  frac nullCons_p<0.05=%.2f",
+                     len(cr), cr["auc_consresid"].median(), (cr["nullCons_p"] < 0.05).mean())
 
 
 if __name__ == "__main__":
