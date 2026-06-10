@@ -61,8 +61,8 @@ def read_msa(path: Path):
 
 
 def seq_weights(aln: np.ndarray, theta: float) -> np.ndarray:
-    """ProteinGym/EVE-style reweighting: w_i = 1 / #{j : identity(i,j) > 1-theta}. O(N^2); fine for
-    typical MSA depths. theta NaN/0 -> uniform weights."""
+    """ProteinGym/EVE-style reweighting: w_i = 1 / #{j : identity(i,j) > 1-theta}. O(N^2) — only
+    affordable on a subsample (see --reweight/--max_weight_seqs). theta NaN/0 -> uniform."""
     n, L = aln.shape
     if not np.isfinite(theta) or theta <= 0:
         return np.ones(n)
@@ -74,40 +74,60 @@ def seq_weights(aln: np.ndarray, theta: float) -> np.ndarray:
     return w
 
 
-def column_entropy(col: np.ndarray, w: np.ndarray) -> float:
-    counts = np.zeros(20)
-    for a_i, wi in zip(col, w):
-        if 0 <= a_i < 20:
-            counts[a_i] += wi
-    tot = counts.sum()
-    if tot <= 0:
-        return np.nan
-    p = counts[counts > 0] / tot
-    return float(-(p * np.log(p)).sum())
+def column_entropies(aln: np.ndarray, w: np.ndarray) -> np.ndarray:
+    """Per-column Shannon entropy (nats) over the 20 AAs, gap (-1) excluded, sequence-weighted by w.
+    Vectorized: 20 masks over the (N, L) alignment -> (L,) entropies."""
+    L = aln.shape[1]
+    counts = np.zeros((L, 20))
+    for a in range(20):
+        counts[:, a] = (w[:, None] * (aln == a)).sum(axis=0)
+    tot = counts.sum(axis=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        p = counts / tot[:, None]
+        ent = -np.nansum(np.where(p > 0, p * np.log(p), 0.0), axis=1)
+    ent[tot <= 0] = np.nan
+    return ent
 
 
-def process_assay(dms_id: str, ref_row: pd.Series, msa_dir: Path) -> pd.DataFrame:
+def process_assay(dms_id: str, ref_row: pd.Series, msa_dir: Path,
+                  reweight: bool, max_weight_seqs: int, rng: np.random.Generator) -> pd.DataFrame:
     msa_path = msa_dir / str(ref_row["MSA_filename"])
     if not msa_path.exists():
         log.warning("  %s: MSA missing (%s)", dms_id, msa_path); return None
     seqs = list(read_msa(msa_path))
     if not seqs:
         return None
-    # keep only query columns: positions that are upper/gap in the FIRST (query) sequence
+    # keep only query columns: positions that are upper/gap in the FIRST (query) sequence (a3m convention)
     query = seqs[0][1]
-    keep_cols = [j for j, c in enumerate(query) if c == "-" or c.isupper()]
+    keep_cols = np.array([j for j, c in enumerate(query) if c == "-" or c.isupper()])
+    upper = np.frombuffer(query.encode(), dtype="S1")
+    qmap = np.array([AA_IDX.get(c.decode().upper(), -1) for c in upper[keep_cols]])  # query residue per kept col
+    is_target_col = np.array([query[j] != "-" for j in keep_cols])                  # query gap -> no target pos
+
     def encode(s):
-        return np.array([AA_IDX.get(s[j].upper(), -1) if (s[j] != "-") else -1 for j in keep_cols])
+        return np.array([AA_IDX.get(s[j].upper(), -1) if s[j] != "-" else -1 for j in keep_cols])
     aln = np.vstack([encode(s) for _, s in seqs])           # (N, Lq), -1 = gap/non-AA
-    w = seq_weights(aln, float(ref_row.get("MSA_theta", np.nan)))
+    n_full = aln.shape[0]
+
+    if reweight:
+        if n_full > max_weight_seqs:
+            sub = rng.choice(n_full, size=max_weight_seqs, replace=False)
+            aln = aln[sub]
+            log.info("  %s: reweight on %d/%d subsampled seqs (O(N^2))", dms_id, len(sub), n_full)
+        w = seq_weights(aln, float(ref_row.get("MSA_theta", np.nan)))
+    else:
+        w = np.ones(aln.shape[0])                            # unweighted entropy over all seqs (fast)
+
+    ent = column_entropies(aln, w)                           # (Lq,)
     start = int(ref_row.get("MSA_start", 1))
+    pos_counter = 0
     rows = []
-    for jcol in range(aln.shape[1]):
-        if AA_IDX.get(query[keep_cols[jcol]].upper(), -1) < 0 and query[keep_cols[jcol]] == "-":
-            continue  # query gap: no target position
-        ent = column_entropy(aln[:, jcol], w)
-        rows.append({"DMS_id": dms_id, "pos": start + jcol, "score": ent})
-    log.info("  %s: %d seqs, %d target positions", dms_id, aln.shape[0], len(rows))
+    for jcol in range(len(keep_cols)):
+        if not is_target_col[jcol]:
+            continue
+        rows.append({"DMS_id": dms_id, "pos": start + pos_counter, "score": float(ent[jcol])})
+        pos_counter += 1
+    log.info("  %s: %d seqs (reweight=%s), %d target positions", dms_id, n_full, reweight, len(rows))
     return pd.DataFrame(rows)
 
 
@@ -117,15 +137,24 @@ def main() -> None:
     ap.add_argument("--msa_dir", type=Path, required=True)
     ap.add_argument("--assays", type=str, default=None)
     ap.add_argument("--output", type=Path, required=True)
+    ap.add_argument("--reweight", action="store_true",
+                    help="apply theta sequence-reweighting (O(N^2); subsamples to --max_weight_seqs). "
+                         "Default off: plain Shannon entropy, a standard conservation measure and a "
+                         "fine matching covariate, computed over all sequences in seconds.")
+    ap.add_argument("--max_weight_seqs", type=int, default=8000)
+    ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
+    rng = np.random.default_rng(args.seed)
+    log.info("reweight=%s  max_weight_seqs=%d  seed=%d", args.reweight, args.max_weight_seqs, args.seed)
     ref = pd.read_csv(args.reference).set_index("DMS_id")
     ids = args.assays.split(",") if args.assays else list(ref.index)
     out = []
     for dms_id in ids:
         if dms_id not in ref.index:
             log.warning("%s not in reference", dms_id); continue
-        df = process_assay(dms_id, ref.loc[dms_id], args.msa_dir)
+        df = process_assay(dms_id, ref.loc[dms_id], args.msa_dir,
+                           args.reweight, args.max_weight_seqs, rng)
         if df is not None:
             out.append(df)
     if not out:
