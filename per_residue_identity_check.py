@@ -18,7 +18,7 @@ positions — same filter as harvest_per_residue_wt.py):
 If the median identity-Spearman is ~0.4 (comparable to the per-residue feature numbers 0.45-0.53),
 the per-residue readout is largely a non-learned identity prior, and trained ~ random-init follows.
 
-Reads: data/proteingym/concept_matches.csv, data/DMS_ProteinGym_substitutions/*.csv  (no model)
+Reads: data/proteingym/concept_matches.csv, data/external/DMS_ProteinGym_substitutions/*.csv  (no model)
 Writes: data/proteingym/per_residue_identity_check.csv ; prints medians.
 
 Usage:  uv run --with pandas --with numpy --with scipy python \
@@ -35,7 +35,7 @@ from scipy.stats import spearmanr
 
 ROOT = Path("/Users/sohrab.tawana/private/crosscoder")
 PG = ROOT / "data/proteingym"
-DMS_DIR = ROOT / "data/DMS_ProteinGym_substitutions"
+DMS_DIR = ROOT / "data/external/DMS_ProteinGym_substitutions"
 MATCHES = PG / "concept_matches.csv"
 OUT = PG / "per_residue_identity_check.csv"
 MUT_RE = re.compile(r"^([A-Z])(\d+)([A-Z\*])$")

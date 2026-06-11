@@ -17,7 +17,7 @@ import torch
 
 ROOT = Path("/Users/sohrab.tawana/private/crosscoder")
 CKPT = ROOT / "model_checkpoints/crosscoder_l8192_k32_bs512_full_2026-03-12_06-03-41/crashed_epoch_0_step_2519836/model.pt"
-PAIRINGS = ROOT / "data/crosscoder_eval/uniprotkb_modern_score45_67k/test_counts/heldout_all_top_pairings.csv"
+PAIRINGS = ROOT / "data/crosscoder_eval/pre-auxfix/real/uniprotkb_modern_score45_67k/test_counts/heldout_all_top_pairings.csv"
 OUTDIR = ROOT / "data/figures"
 OUT = OUTDIR / "layerwise_feature_anatomy.png"
 OUT_FACET = OUTDIR / "layerwise_feature_anatomy_faceted.png"

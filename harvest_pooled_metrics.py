@@ -36,9 +36,9 @@ Usage (smoke test):
     uv run --project repos/crosscode --with scipy --with pyarrow python \\
       repos/sparse-crosscoders-prott5/harvest_pooled_metrics.py \\
       --crosscoder_dir model_checkpoints/.../crashed_epoch_0_step_2519836 \\
-      --pairings data/crosscoder_eval/.../heldout_all_top_pairings.csv \\
+      --pairings data/crosscoder_eval/pre-auxfix/real/.../heldout_all_top_pairings.csv \\
       --matches data/proteingym_concept_matches.csv \\
-      --dms_dir data/DMS_ProteinGym_substitutions \\
+      --dms_dir data/external/DMS_ProteinGym_substitutions \\
       --output_dir data/proteingym/pooled_metrics \\
       --max_variants 30 \\
       --assays /tmp/two_assay.tsv

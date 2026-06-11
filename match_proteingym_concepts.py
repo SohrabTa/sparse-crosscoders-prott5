@@ -20,10 +20,10 @@ to concept C and the mutation lands in C's residues") can be tested directly.
 Usage (from repo root):
     uv run --with pandas --with requests \
       python repos/sparse-crosscoders-prott5/match_proteingym_concepts.py \
-        --pairings data/crosscoder_eval/uniprotkb_modern_score45_67k/test_counts/heldout_all_top_pairings.csv \
+        --pairings data/crosscoder_eval/pre-auxfix/real/uniprotkb_modern_score45_67k/test_counts/heldout_all_top_pairings.csv \
         --dms_reference /tmp/DMS_substitutions.csv \
-        --dms_dir data/DMS_ProteinGym_substitutions \
-        --cache_dir data/proteingym_uniprot_cache \
+        --dms_dir data/external/DMS_ProteinGym_substitutions \
+        --cache_dir data/external/proteingym_uniprot_cache \
         --output data/proteingym_concept_matches.csv
 """
 

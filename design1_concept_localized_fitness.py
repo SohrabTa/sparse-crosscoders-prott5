@@ -42,7 +42,7 @@ CONFOUND CONTROLS (the point/site concepts have a sharp one — amino-acid ident
 INPUTS (read-only):
   --crosscoder_dir   <ckpt>/  (load_sae -> BatchTopK crosscoder)        [ae_normalized.pt]
   --matches          data/proteingym/concept_matches.csv  (labelled features per (assay, concept))
-  --dms_dir          data/DMS_ProteinGym_substitutions/<DMS_id>.csv
+  --dms_dir          data/external/DMS_ProteinGym_substitutions/<DMS_id>.csv
   --maxact           <ckpt>/.../max_activations_per_feature.pt  (live mask for null A)
 
 OUTPUT:
@@ -53,7 +53,7 @@ Smoke (local M1, from crosscoder root):
     repos/sparse-crosscoders-prott5/design1_concept_localized_fitness.py \
       --crosscoder_dir model_checkpoints/crosscoder_l8192_k32_bs512_full_2026-03-12_06-03-41/crashed_epoch_0_step_2519836 \
       --matches data/proteingym/concept_matches.csv \
-      --dms_dir data/DMS_ProteinGym_substitutions \
+      --dms_dir data/external/DMS_ProteinGym_substitutions \
       --maxact model_checkpoints/crosscoder_l8192_k32_bs512_full_2026-03-12_06-03-41/crashed_epoch_0_step_2519836/uniprotkb_modern_score45_67k/max_activations_per_feature.pt \
       --output_dir data/proteingym/design1_localized \
       --assays A0A2Z5U3Z0_9INFA_Doud_2016,C6KNH7_9INFA_Lee_2018 --smoke

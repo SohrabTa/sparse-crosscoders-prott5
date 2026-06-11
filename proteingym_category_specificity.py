@@ -28,7 +28,7 @@ is the principled self-contained null. (A baseline pooled harvest remains a docu
 
 Inputs (read-only):
   - data/proteingym/pooled_metrics/summary.csv   (our scored (DMS_id, concept, feature) rows)
-  - data/DMS_substitutions.csv                   (ProteinGym reference; coarse_selection_type)
+  - data/external/DMS_substitutions.csv          (ProteinGym reference; coarse_selection_type)
 Outputs:
   - data/proteingym/category_specificity_pairings.csv   (per-pairing matched/mismatched + |rho|)
   - data/proteingym/category_specificity_summary.csv     (per-concept + headline numbers)
@@ -70,7 +70,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if not (ROOT / "data").exists():
     ROOT = Path.cwd()
 SUMMARY = ROOT / "data" / "proteingym" / "pooled_metrics" / "summary.csv"
-REF = ROOT / "data" / "DMS_substitutions.csv"
+REF = ROOT / "data" / "external" / "DMS_substitutions.csv"
 OUT_PAIR = ROOT / "data" / "proteingym" / "category_specificity_pairings.csv"
 OUT_SUM = ROOT / "data" / "proteingym" / "category_specificity_summary.csv"
 

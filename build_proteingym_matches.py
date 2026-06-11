@@ -7,7 +7,7 @@ build the assay list straight from the ProteinGym reference table, covering ALL 
 substitution assays.
 
 Inputs
-  --reference   data/DMS_substitutions.csv  (ProteinGym reference; DMS_id + seq_len)
+  --reference   data/external/DMS_substitutions.csv  (ProteinGym reference; DMS_id + seq_len)
 Outputs
   --out         CSV with columns: DMS_id, target_seq_len   (one row per assay)
 
@@ -29,7 +29,7 @@ import pandas as pd
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--reference", type=Path,
-                    default=Path("data/DMS_substitutions.csv"))
+                    default=Path("data/external/DMS_substitutions.csv"))
     ap.add_argument("--out", type=Path,
                     default=Path("data/proteingym_full_feature_matches.csv"))
     ap.add_argument("--max_seq_len", type=int, default=None,

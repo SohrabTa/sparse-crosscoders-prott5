@@ -17,7 +17,7 @@ then reports the median across the 135 assays.
 Reads:
   data/proteingym/full_feature_spearman/full_feature_spearman.csv
   <ckpt>/uniprotkb_modern_score45_67k/max_activations_per_feature.pt   (dead mask: max==0)
-  data/crosscoder_eval/.../heldout_all_top_pairings.csv                (paired feature ids)
+  data/crosscoder_eval/pre-auxfix/real/.../heldout_all_top_pairings.csv (paired feature ids)
 Writes:
   data/proteingym/chance_control_summary.csv
 
@@ -37,7 +37,7 @@ PG = ROOT / "data/proteingym"
 FF = PG / "full_feature_spearman/full_feature_spearman.csv"
 MAXACT = (ROOT / "model_checkpoints/crosscoder_l8192_k32_bs512_full_2026-03-12_06-03-41/"
           "crashed_epoch_0_step_2519836/uniprotkb_modern_score45_67k/max_activations_per_feature.pt")
-PAIRINGS = (ROOT / "data/crosscoder_eval/uniprotkb_modern_score45_67k/"
+PAIRINGS = (ROOT / "data/crosscoder_eval/pre-auxfix/real/uniprotkb_modern_score45_67k/"
             "test_counts/heldout_all_top_pairings.csv")
 OUT = PG / "chance_control_summary.csv"
 R_DRAWS = 200

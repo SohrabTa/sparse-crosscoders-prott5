@@ -7,7 +7,7 @@ assays) more than the other categories? Before running that test we need to know
 statistical power: how many *distinct assays* fall in each (concept x coarse_selection_type) cell.
 
 Inputs (read-only):
-  - data/DMS_substitutions.csv                         (ProteinGym reference; has coarse_selection_type)
+  - data/external/DMS_substitutions.csv                (ProteinGym reference; has coarse_selection_type)
   - data/proteingym/pooled_metrics/summary.csv         (our (DMS_id, concept, feature) scored rows)
 
 Output:
@@ -25,7 +25,7 @@ if not (ROOT / "data").exists():
     # fall back: allow running from crosscoder root directly
     ROOT = Path.cwd()
 
-REF = ROOT / "data" / "DMS_substitutions.csv"
+REF = ROOT / "data" / "external" / "DMS_substitutions.csv"
 SUMMARY = ROOT / "data" / "proteingym" / "pooled_metrics" / "summary.csv"
 OUT = ROOT / "data" / "proteingym" / "category_counts.csv"
 

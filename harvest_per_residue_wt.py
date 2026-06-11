@@ -16,7 +16,7 @@ activations. ~135 forwards. Runs locally on an M1 (MPS) — the readout needs no
 
 Reads:
   --matches    data/proteingym/concept_matches.csv
-  --dms_dir    data/DMS_ProteinGym_substitutions/
+  --dms_dir    data/external/DMS_ProteinGym_substitutions/
   --crosscoder_dir / --checkpoint   the trained crosscoder (or the baseline, for the null)
   --maxact     <ckpt>/.../max_activations_per_feature.pt   (dead mask, for the analysis)
   --pairings   heldout_all_top_pairings.csv                (paired feature ids, for the analysis)
@@ -30,9 +30,9 @@ Usage (local M1, from the crosscoder root):
     repos/sparse-crosscoders-prott5/harvest_per_residue_wt.py \
       --crosscoder_dir model_checkpoints/crosscoder_l8192_k32_bs512_full_2026-03-12_06-03-41/crashed_epoch_0_step_2519836 \
       --matches data/proteingym/concept_matches.csv \
-      --dms_dir data/DMS_ProteinGym_substitutions \
+      --dms_dir data/external/DMS_ProteinGym_substitutions \
       --maxact model_checkpoints/crosscoder_l8192_k32_bs512_full_2026-03-12_06-03-41/crashed_epoch_0_step_2519836/uniprotkb_modern_score45_67k/max_activations_per_feature.pt \
-      --pairings data/crosscoder_eval/uniprotkb_modern_score45_67k/test_counts/heldout_all_top_pairings.csv \
+      --pairings data/crosscoder_eval/pre-auxfix/real/uniprotkb_modern_score45_67k/test_counts/heldout_all_top_pairings.csv \
       --output_dir data/proteingym/per_residue_wt --skip_existing
 """
 from __future__ import annotations

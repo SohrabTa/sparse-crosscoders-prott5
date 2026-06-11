@@ -26,7 +26,7 @@ imports required.
 Usage:
     uv run --project repos/crosscode python repos/sparse-crosscoders-prott5/harvest_raw_prott5.py \\
         --matches data/proteingym_concept_matches.csv \\
-        --dms_dir data/DMS_ProteinGym_substitutions \\
+        --dms_dir data/external/DMS_ProteinGym_substitutions \\
         --output_dir data/proteingym/raw_prott5_layer12 \\
         --layer 12 --batch_size 8
 """

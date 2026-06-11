@@ -20,8 +20,8 @@ Design 1's identity-restricted control (null C) is the active confound control; 
 Usage:
   uv run --with biopython --with pandas --with numpy python \
     repos/sparse-crosscoders-prott5/harvest_msa_conservation.py \
-      --reference data/DMS_substitutions.csv \
-      --msa_dir data/DMS_msa_files \
+      --reference data/external/DMS_substitutions.csv \
+      --msa_dir data/external/DMS_msa_files \
       --assays A0A2Z5U3Z0_9INFA_Doud_2016,C6KNH7_9INFA_Lee_2018 \
       --output data/proteingym/msa_conservation.csv
 

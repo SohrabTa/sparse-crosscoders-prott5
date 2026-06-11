@@ -28,7 +28,7 @@ Usage:
       repos/sparse-crosscoders-prott5/position_residualized_spearman.py \\
       --pooled_dir data/proteingym/pooled_metrics \\
       --matches data/proteingym_concept_matches.csv \\
-      --pairings data/crosscoder_eval/.../heldout_all_top_pairings.csv \\
+      --pairings data/crosscoder_eval/pre-auxfix/real/.../heldout_all_top_pairings.csv \\
       --output data/proteingym/position_residualized_summary.csv
 """
 from __future__ import annotations
