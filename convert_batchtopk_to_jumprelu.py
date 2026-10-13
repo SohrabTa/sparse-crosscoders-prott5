@@ -64,6 +64,14 @@ INPUTS
                      via sharding (see embed_fasta_to_shards). Use --activations OR
                      --fasta, not both.
 
+  --layer            for a one-layer SAE (roadmap PP-06a): the hookpoint number N of
+                     encoder.blocks.N.hook_resid_post that the SAE trained on. Each
+                     calibration tensor is cut to [:, :, N-1:N, :] before estimation.
+                     The calibration data, the token count and the quantile rule stay
+                     the same as for the crosscoder. The sidecar and the converted
+                     config.yaml record `layer`, and the streaming encode reads it from
+                     the config. Without --layer, nothing changes.
+
 OUTPUTS
 -------
   <out_dir>/jumprelu_threshold.pt   dict: {log_threshold_L: FloatTensor[n_latents],
@@ -196,7 +204,7 @@ def embed_fasta_to_shards(
 
 
 def iter_activation_batches(
-    activations_dir: Path, batch_tokens: int, device: str, dtype: torch.dtype
+    activations_dir: Path, batch_tokens: int, device: str, dtype: torch.dtype, layer: int | None = None
 ) -> Iterator[torch.Tensor]:
     """Yield [batch_tokens, M, P, D] activation chunks from saved .pt tensors.
 
@@ -224,6 +232,8 @@ def iter_activation_batches(
                 f"{f}: expected [N, M, P, D], got shape {tuple(t.shape)}. "
                 "Adapt iter_activation_batches to the real layout."
             )
+        if layer is not None:
+            t = t[:, :, layer - 1 : layer, :]
         buf.append(t)
         n_buffered += t.shape[0]
         while n_buffered >= batch_tokens:
@@ -304,7 +314,7 @@ def mean_l0_under_jumprelu(inner, log_threshold_L: torch.Tensor, batch: torch.Te
 
 def write_converted_checkpoint(
     crosscoder_dir: Path, checkpoint: str, out_dir: Path,
-    log_threshold_L: torch.Tensor, bandwidth: float, device: str,
+    log_threshold_L: torch.Tensor, bandwidth: float, device: str, layer: int | None = None,
 ):
     """Write a self-contained JumpReLU checkpoint dir (config rewritten, param injected).
 
@@ -317,6 +327,8 @@ def write_converted_checkpoint(
         "classname": JUMPRELU_CLASSNAME,
         "cfg": {"size": n_latents, "bandwidth": bandwidth},
     }
+    if layer is not None:
+        cfg["layer"] = layer
     (out_dir / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False))
 
     # Derive the EXACT state_dict key the JumpReLU threshold will have by scaffolding
@@ -389,7 +401,14 @@ def main():
     ap.add_argument("--write_converted", action="store_true",
                     help="also write a self-contained converted JumpReLU checkpoint dir")
     ap.add_argument("--device", type=str, default=None, help="cuda|mps|cpu (auto if unset)")
+    ap.add_argument("--layer", type=int, default=None,
+                    help="one-layer SAE only: its hookpoint number N (encoder.blocks.N); "
+                         "cuts the 24-layer calibration tensors to that layer")
     args = ap.parse_args()
+    if args.layer is not None:
+        named = re.search(r"encoder\.blocks\.(\d+)\.hook_resid_post", str(args.crosscoder_dir))
+        if named and int(named.group(1)) != args.layer:
+            ap.error(f"--layer {args.layer} but the checkpoint path names layer {named.group(1)}")
 
     if args.device:
         device = args.device
@@ -417,15 +436,21 @@ def main():
 
     wrapper, inner = load_batchtopk_crosscoder(args.crosscoder_dir, args.checkpoint, device)
     dtype = next(inner.parameters()).dtype
+    if args.layer is not None and inner.n_hookpoints != 1:
+        ap.error(f"--layer needs a one-layer SAE, the checkpoint has {inner.n_hookpoints} hookpoints")
 
     def capped_batches():
-        for i, b in enumerate(iter_activation_batches(args.activations, args.batch_tokens, device, dtype)):
+        for i, b in enumerate(
+            iter_activation_batches(args.activations, args.batch_tokens, device, dtype, args.layer)
+        ):
             if i >= args.max_batches:
                 break
             yield b
 
     # estimation consumes the iterator; keep one batch for the L0 sanity check
-    sanity_batch = next(iter_activation_batches(args.activations, args.batch_tokens, device, dtype))
+    sanity_batch = next(
+        iter_activation_batches(args.activations, args.batch_tokens, device, dtype, args.layer)
+    )
     log_threshold_L, theta, n_batches = estimate_threshold(inner, capped_batches(), args.k, args.mode)
     mean_l0 = mean_l0_under_jumprelu(inner, log_threshold_L, sanity_batch)
 
@@ -441,13 +466,14 @@ def main():
         "theta": theta, "mode": args.mode, "k": args.k,
         "batch_tokens": args.batch_tokens, "n_batches": n_batches,
         "bandwidth": args.bandwidth, "mean_L0_check": mean_l0,
+        **({"layer": args.layer} if args.layer is not None else {}),
     }, sidecar)
     log.info("Wrote threshold sidecar to %s", sidecar)
 
     if args.write_converted:
         write_converted_checkpoint(
             args.crosscoder_dir, args.checkpoint, out_dir / "converted",
-            log_threshold_L, args.bandwidth, device,
+            log_threshold_L, args.bandwidth, device, layer=args.layer,
         )
         shutil.copy2(sidecar, out_dir / "converted" / "jumprelu_threshold.pt")
 
