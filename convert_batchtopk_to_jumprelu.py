@@ -148,6 +148,8 @@ def embed_fasta_to_shards(
     max_seq_len: int | None = None,
     max_tokens: int | None = None,
     store_dtype: torch.dtype = torch.float16,
+    randomize_weights: bool = False,
+    randomize_weights_seed: int = 42,
 ) -> Path:
     """Embed a FASTA / one-seq-per-line file into a dir of [N_tokens, 1, 24, 1024]
     shards (the layout iter_activation_batches reads), via the SAME embedder the
@@ -168,6 +170,10 @@ def embed_fasta_to_shards(
     *would* bite it silently changes what theta is measured on, which is exactly the
     quantity this script exists to get right. Truncating a protein also feeds the
     model an artificial C-terminus. Pass it explicitly if you ever want it.
+
+    `randomize_weights` embeds with the shuffled ProtT5 of a random-init baseline
+    (crosscode LLMConfig `randomize_weights` and `randomize_weights_seed`). theta of a
+    baseline must come from the model that the baseline was trained on.
     """
     from interplm.embedders.prott5 import ProtT5CrosscoderEmbedder
 
@@ -183,9 +189,16 @@ def embed_fasta_to_shards(
         raise RuntimeError(f"No sequences parsed from {fasta}")
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    log.info("Embedding up to %d seqs (length cap: %s) via %s -> %s",
-             len(seqs), max_seq_len or "none", model_name, out_dir)
-    embedder = ProtT5CrosscoderEmbedder(model_name=model_name, device=device)
+    log.info("Embedding up to %d seqs (length cap: %s) via %s%s -> %s",
+             len(seqs), max_seq_len or "none", model_name,
+             f" (weights shuffled, seed {randomize_weights_seed})" if randomize_weights else "",
+             out_dir)
+    embedder = ProtT5CrosscoderEmbedder(
+        model_name=model_name,
+        device=device,
+        randomize_weights=randomize_weights,
+        randomize_weights_seed=randomize_weights_seed,
+    )
 
     written, shard_i = 0, 0
     for start in range(0, len(seqs), seqs_per_shard):
@@ -382,6 +395,11 @@ def main():
                          "run: sequences in, threshold out). Mutually exclusive with --activations.")
     ap.add_argument("--model_name", type=str, default="Rostlab/prot_t5_xl_uniref50",
                     help="ProtT5 model for --fasta embedding (match training)")
+    ap.add_argument("--randomize_weights", action="store_true",
+                    help="embed --fasta with the shuffled ProtT5 of a random-init baseline "
+                         "(match training: crosscode LLMConfig randomize_weights)")
+    ap.add_argument("--randomize_weights_seed", type=int, default=42,
+                    help="seed of that shuffle (match training: randomize_weights_seed)")
     ap.add_argument("--seqs_per_shard", type=int, default=64,
                     help="sequences embedded per shard when using --fasta (memory knob)")
     ap.add_argument("--max_seq_len", type=int, default=None,
@@ -430,9 +448,13 @@ def main():
             args.fasta, out_dir / "_calib_acts", device,
             model_name=args.model_name, seqs_per_shard=args.seqs_per_shard,
             max_seq_len=args.max_seq_len, max_tokens=target_tokens,
+            randomize_weights=args.randomize_weights,
+            randomize_weights_seed=args.randomize_weights_seed,
         )
     elif args.activations is None:
         ap.error("provide --activations or --fasta")
+    elif args.randomize_weights:
+        ap.error("--randomize_weights changes the --fasta embedding; it has no effect on --activations")
 
     wrapper, inner = load_batchtopk_crosscoder(args.crosscoder_dir, args.checkpoint, device)
     dtype = next(inner.parameters()).dtype
@@ -467,6 +489,8 @@ def main():
         "batch_tokens": args.batch_tokens, "n_batches": n_batches,
         "bandwidth": args.bandwidth, "mean_L0_check": mean_l0,
         **({"layer": args.layer} if args.layer is not None else {}),
+        **({"randomize_weights": True, "randomize_weights_seed": args.randomize_weights_seed}
+           if args.randomize_weights else {}),
     }, sidecar)
     log.info("Wrote threshold sidecar to %s", sidecar)
 
